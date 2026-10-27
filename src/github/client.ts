@@ -30,6 +30,7 @@ export interface GitHubClient {
   listCheckRuns(sha: string): Promise<CheckRunInfo[]>
   listWorkflowJobs(sha: string): Promise<WorkflowJobInfo[]>
   getJobLog(jobId: number, maxChars: number): Promise<{ text: string | null; error?: string }>
+  listPullCommits(number: number): Promise<{ sha: string; message: string }[]>
   listComments(number: number): Promise<{ id: number; body: string }[]>
   createComment(number: number, body: string): Promise<{ id: number; url: string }>
   updateComment(id: number, body: string): Promise<{ id: number; url: string }>
@@ -206,6 +207,21 @@ export function createGitHubClient(options: {
         repo,
         jobId,
         maxChars,
+      })
+    },
+
+    async listPullCommits(number) {
+      const rows = await paginate(transport, 'GET /repos/{owner}/{repo}/pulls/{pull_number}/commits', {
+        owner,
+        repo,
+        pull_number: number,
+      }, (data) => (Array.isArray(data) ? data : []), 100)
+      return rows.flatMap((row) => {
+        const record = asRecord(row)
+        const commit = asRecord(record?.commit)
+        const sha = asString(record?.sha)
+        if (!sha) return []
+        return [{ sha, message: asString(commit?.message) ?? '' }]
       })
     },
 

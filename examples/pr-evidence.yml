@@ -8,6 +8,7 @@ checks:
   scope: true
   test-evidence: true
   review-packet: true
+  claims: true
 
 scope:
   # Warn when the pull request reaches either threshold.
@@ -70,3 +71,29 @@ review-packet:
   #   risks: ["Risks", "Risk", "风险"]
   #   tests-run: ["Tests run", "Tests", "已运行测试", "测试"]
   #   self-verification: ["Self-verification", "Self verification", "What I verified", "本人验证", "自验"]
+
+claims:
+  # Also scan commit messages. The title and description are always scanned.
+  scan-commits: false
+  # warn (default) or error. This sets the claim check's severity. The job
+  # still stays green unless the workflow input fail-on is warning or error.
+  contradicted: warn
+  # A list here replaces the built-in phrases. Patterns are JavaScript
+  # regexes. A leading (?i) is case-insensitive. linked_issue may capture
+  # the issue number in the first group. evidence is one of:
+  # tests, lint, build, breaking, test_files, linked_issue.
+  # patterns:
+  #   - id: tests_pass
+  #     evidence: tests
+  #     patterns:
+  #       - "(?i)(?<![A-Za-z])all tests pass(?![A-Za-z])"
+  #       - "测试全部通过"
+  # lint-name-patterns:
+  #   - "(?i)\\blint\\b"
+  # build-name-patterns:
+  #   - "(?i)\\bbuild\\b"
+  # breaking-name-patterns:
+  #   - "(?i)breaking"
+  # test-paths:
+  #   - "**/*.{test,spec}.{js,cjs,mjs,ts,tsx,jsx}"
+  #   - "**/tests/**"

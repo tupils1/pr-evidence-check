@@ -60,16 +60,40 @@ export interface ReviewPacketConfig {
   incomplete: Severity
 }
 
+export type ClaimEvidenceKind = 'tests' | 'lint' | 'build' | 'breaking' | 'test_files' | 'linked_issue'
+
+export type ClaimVerdict = 'verified' | 'contradicted' | 'unverified'
+
+export type ClaimSource = 'title' | 'description' | 'commit'
+
+export interface ClaimPatternConfig {
+  id: string
+  evidence: ClaimEvidenceKind
+  patterns: string[]
+}
+
+export interface ClaimsConfig {
+  scanCommits: boolean
+  contradicted: Severity
+  patterns: ClaimPatternConfig[]
+  lintNamePatterns: string[]
+  buildNamePatterns: string[]
+  breakingNamePatterns: string[]
+  testPaths: string[]
+}
+
 export interface Config {
   language: Language
   checks: {
     scope: boolean
     testEvidence: boolean
     reviewPacket: boolean
+    claims: boolean
   }
   scope: ScopeConfig
   testEvidence: TestEvidenceConfig
   reviewPacket: ReviewPacketConfig
+  claims: ClaimsConfig
 }
 
 export interface ChangedFile {
@@ -316,6 +340,49 @@ export interface PacketReport {
   sections: PacketSection[]
 }
 
+export type CheckClaimKind = 'lint' | 'build' | 'breaking'
+
+export type ClaimReason =
+  | { code: 'tests.verified'; jobs: string[]; passed: number | null; failed: number | null; skipped: number | null }
+  | { code: 'tests.contradicted'; jobs: string[]; passed: number | null; failed: number | null }
+  | { code: 'tests.unverified_none' }
+  | { code: 'tests.unverified_running'; jobs: string[] }
+  | { code: 'tests.unverified_skipped' }
+  | { code: 'tests.unverified_zero'; jobs: string[] }
+  | { code: 'tests.unverified_api' }
+  | { code: 'check.verified'; kind: CheckClaimKind; jobs: string[] }
+  | { code: 'check.contradicted'; kind: CheckClaimKind; jobs: string[] }
+  | { code: 'check.unverified_none'; kind: CheckClaimKind }
+  | { code: 'check.unverified_running'; kind: CheckClaimKind; jobs: string[] }
+  | { code: 'check.unverified_api'; kind: CheckClaimKind }
+  | { code: 'files.verified'; files: string[] }
+  | { code: 'files.contradicted'; changed: number }
+  | { code: 'files.unverified' }
+  | { code: 'issue.verified'; number: number; title: string; linked: boolean }
+  | { code: 'issue.verified_any'; numbers: number[] }
+  | { code: 'issue.contradicted_missing'; number: number }
+  | { code: 'issue.unverified_none' }
+  | { code: 'issue.unverified_unreadable'; number?: number }
+
+export interface ClaimResult {
+  id: string
+  evidence: ClaimEvidenceKind
+  text: string
+  source: ClaimSource
+  commitSha?: string
+  issueNumber?: number
+  verdict: ClaimVerdict
+  reason: ClaimReason
+}
+
+export interface ClaimReport {
+  enabled: boolean
+  status: CheckStatus
+  scannedCommits: boolean
+  results: ClaimResult[]
+  omitted: number
+}
+
 export interface Report {
   language: Language
   failOn: FailOn
@@ -324,4 +391,5 @@ export interface Report {
   scope: ScopeReport
   evidence: EvidenceReport
   packet: PacketReport
+  claims: ClaimReport
 }

@@ -2,7 +2,7 @@
 
 A free GitHub Action for maintainers reviewing pull requests, including ones an agent wrote. It posts **one comment** and updates that same comment in place.
 
-It does three deterministic checks. No LLM. No model API. Nothing from the pull request is sent off the runner except the normal GitHub API calls that read the pull request, the linked issues, and CI that already ran.
+It does four deterministic checks. No LLM. No model API. Nothing from the pull request is sent off the runner except the normal GitHub API calls that read the pull request, the linked issues, and CI that already ran. Claim verification is the unreleased v1.1 check. The `v1` and `v1.0.0` tags do not include it.
 
 **Zero config.** You do not need `.github/pr-evidence.yml`. Built-in defaults are on until you override them.
 
@@ -10,7 +10,51 @@ The job stays green unless you opt in with `fail-on`, or the action itself is mi
 
 ![Sticky comment on an out-of-scope pull request](docs/scope-comment.png)
 
-The comment above is the sticky comment on [pull request #9](https://github.com/tupils1/pr-evidence-check/pull/9#issuecomment-6445101391). Scope is an error. Test evidence and the review packet passed. Later runs update that same comment.
+The comment above is the sticky comment on [pull request #9](https://github.com/tupils1/pr-evidence-check/pull/9#issuecomment-6445101391). Scope is an error. Test evidence and the review packet passed. Later runs update that same comment. That screenshot is from the tagged v1 comment, before claim verification.
+
+## Unreleased / v1.1
+
+Claim verification is on this branch and is **not** in the `v1` or `v1.0.0` tags. Those tags still run the three checks below. This repository has no v1.1 release.
+
+The action reads the pull request title and description. If `claims.scan-commits` is true, it also reads commit messages. For each configured phrase it uses data this action already collects for the head SHA: test jobs and parsed counts, other check runs and jobs, the diff, and linked issues. Each claim is **verified**, **contradicted**, or **unverified**, in a new section of the same sticky comment. Matching is deterministic. No LLM.
+
+| Phrase | Evidence | Verified | Contradicted | Unverified |
+| --- | --- | --- | --- | --- |
+| `all tests pass`, `tests passing`, `tests pass`, `测试全部通过` | test-like jobs and parsed counts | a matched job succeeded, and any parsed failure count is zero | a matched job failed, timed out, or was cancelled, or parsed failures are greater than zero | no completed test job, a job is still running, or the parsed total is zero |
+| `lint clean`, `已通过 lint` | jobs or checks whose names match the lint patterns | a lint check succeeded | a lint check failed | no successful lint check |
+| `build succeeds` | build name patterns | a build check succeeded | a build check failed | no successful build check |
+| `no breaking changes`, `no breaking change`, `无破坏性变更`, `没有破坏性变更` | breaking-change name patterns | such a check succeeded | such a check failed | no such check ran |
+| `added tests`, `新增了测试`, `添加了测试`, `新增测试` | diff paths | a test file was added or gained lines | the diff is readable and no test file was added or expanded | the diff could not be read |
+| `fixed #12`, `fixes #12`, `fix #12`, `已修复 #12` | linked issues | that issue exists and this pull request references it | that issue number does not exist | the issue could not be read |
+| `已修复` | linked issues | at least one linked issue was readable | — | no readable linked issue |
+
+`claims.contradicted` defaults to `warn`. The job stays green unless `fail-on` is `warning` or `error`. `claims.scan-commits` defaults to false. A negated phrase (`not all tests pass`, `没有测试全部通过`) is ignored. Fenced code blocks and HTML comments are ignored. A `patterns` list in `.github/pr-evidence.yml` replaces the built-in phrases. Patterns are JavaScript regular expressions; a leading `(?i)` is case-insensitive. A `linked_issue` pattern may capture the issue number in the first group.
+
+This does not prove the diff is correct. `fixed #12` means the issue exists and is referenced, not that the change solves it. `no breaking changes` stays unverified unless a check with a breaking-change name ran. `all tests pass` trusts the existing CI conclusion and parsed counts. It does not re-run tests.
+
+[AgentClaimGuard](https://github.com/konoeph/AgentClaimGuard) is a Python policy gate for structured claims and caller-supplied evidence. [agent-receipts](https://github.com/inchwormz/agent-receipts) is a local hash-chained runtime that promotes a claim only when repo checks bind to exact bytes. [obsigna](https://github.com/agent-receipts/obsigna) verifies signed receipt chains. This action does not sign anything and does not ask the agent to cooperate. It compares phrases already written on the pull request with CI, the diff, and linked issues, and it warns instead of blocking.
+
+### 中文
+
+声明核验在这个分支上，**不在** `v1` 和 `v1.0.0` 标签里。这两个标签仍只跑下面三项检查。仓库没有 v1.1 发行版。
+
+action 读取 PR 标题和描述。`claims.scan-commits` 为 true 时也读提交说明。每条配置好的短语，都只用这个 head SHA 上 action 已经收集的数据：像测试的 job 和解析出的数量、其他 check run 和 job、diff、关联 issue。每条声明标成 **已证实**、**相矛盾** 或 **未证实**，写进同一条粘性评论的新小节。规则是确定的，不调用 LLM。
+
+| 短语 | 证据 | 已证实 | 相矛盾 | 未证实 |
+| --- | --- | --- | --- | --- |
+| `all tests pass`、`tests passing`、`tests pass`、`测试全部通过` | 像测试的 job 和解析数量 | 命中的 job 成功，且解析出的失败数为 0 | job 失败、超时或取消，或解析出的失败数大于 0 | 没有已结束的测试 job、job 还在跑，或解析总数为 0 |
+| `lint clean`、`已通过 lint` | 名称命中 lint 模式的 job 或 check | lint 检查成功 | lint 检查失败 | 没有成功的 lint 检查 |
+| `build succeeds` | 构建名称模式 | 构建检查成功 | 构建检查失败 | 没有成功的构建检查 |
+| `no breaking changes`、`no breaking change`、`无破坏性变更`、`没有破坏性变更` | 破坏性变更名称模式 | 这类检查成功 | 这类检查失败 | 没有这类检查 |
+| `added tests`、`新增了测试`、`添加了测试`、`新增测试` | diff 路径 | 有测试文件被新增或增加了行 | diff 能读到，但没有新增或增加行数的测试文件 | diff 读不到 |
+| `fixed #12`、`fixes #12`、`fix #12`、`已修复 #12` | 关联 issue | 该 issue 存在，且这个 PR 提到了它 | 该编号不存在 | issue 读不到 |
+| `已修复` | 关联 issue | 至少有一个关联 issue 能读到 | — | 没有能读到的关联 issue |
+
+`claims.contradicted` 默认是 `warn`。除非 `fail-on` 是 `warning` 或 `error`，job 仍然成功。`claims.scan-commits` 默认 false。被否定的短语（`not all tests pass`、`没有测试全部通过`）会忽略。围栏代码块和 HTML 注释会忽略。`.github/pr-evidence.yml` 里的 `patterns` 列表会替换内置短语。模式是 JavaScript 正则，开头的 `(?i)` 表示不区分大小写。`linked_issue` 的模式可以用第一个捕获组取出 issue 编号。
+
+这不证明 diff 是对的。`fixed #12` 只说明 issue 存在并且被引用，不说明改动修好了它。没有名称像破坏性变更的检查时，`no breaking changes` 保持未证实。`all tests pass` 信任已有 CI 结论和解析数量，不会重新跑测试。
+
+[AgentClaimGuard](https://github.com/konoeph/AgentClaimGuard) 是 Python 策略门，核对结构化声明和调用方提供的证据。[agent-receipts](https://github.com/inchwormz/agent-receipts) 是本地哈希链运行时，只有仓库检查绑定到精确字节时才提升声明。[obsigna](https://github.com/agent-receipts/obsigna) 验证已签名的收据链。这个 action 不签名，也不要求代理配合。它只把 PR 上已经写下的短语和 CI、diff、关联 issue 对照，默认警告，不阻断。
 
 ## What it checks
 
@@ -45,6 +89,10 @@ Name patterns are configurable. Defaults match names such as `test`, `unit`, `e2
 The pull request body should contain four sections: **Intent**, **Risks**, **Tests run**, and **Self-verification**. English and Chinese headings both count (`意图`, `风险`, `已运行测试`, `本人验证`, and the other aliases in the default config). HTML comments and placeholders such as `TODO` / `待补充` do not count as content.
 
 [`.github/pull_request_template.md`](.github/pull_request_template.md) is the template, in English and Chinese.
+
+### 4. Claim verification
+
+See [Unreleased / v1.1](#unreleased--v11). Phrases in the title, description, and optional commit messages are marked verified, contradicted, or unverified in the same sticky comment. Contradicted claims warn. They do not fail the job unless `fail-on` is set.
 
 ## Add it
 
@@ -151,6 +199,7 @@ Default severities:
 | No test-like job or check on the SHA | info |
 | A matched test job failed, timed out, or was cancelled | warn |
 | Review packet section missing, empty, or a placeholder | warn |
+| A claim is contradicted | warn. `claims.contradicted: error` raises that check to error. Unverified claims stay inside a passing check |
 
 `test-evidence.require-passed: true` raises a failed test job to error. `test-evidence.no-evidence: warn` or `error` raises the default info for a missing test job. `review-packet.incomplete: error` raises an incomplete packet to an error. If you set `fail-on` and also mark this job required in branch protection, GitHub will block the merge. That is opt-in. The default does not.
 
@@ -165,6 +214,7 @@ checks:
   scope: true
   test-evidence: true
   review-packet: true
+  claims: true
 
 scope:
   large-diff-lines: 400
@@ -187,6 +237,15 @@ test-evidence:
 review-packet:
   min-body-chars: 8
   incomplete: warn
+
+claims:
+  scan-commits: false # also read commit messages
+  contradicted: warn # warn or error. Does not fail the job unless fail-on is set.
+  # patterns: # a list here replaces the built-in phrases
+  #   - id: tests_pass
+  #     evidence: tests # tests, lint, build, breaking, test_files, or linked_issue
+  #     patterns:
+  #       - "(?i)(?<![A-Za-z])all tests pass(?![A-Za-z])"
 ```
 
 `comment-language` on the action overrides `language`. `fail-on` is an action input, not a config key, because failing the job is a workflow choice.
@@ -204,7 +263,7 @@ Job-name patterns are JavaScript regular expressions. A leading `(?i)` makes one
 | `fail-on` | `none` | `none`, `warning`, or `error`. |
 | `comment-language` | empty | `en` or `zh`. Empty uses the config file, which defaults to `en`. |
 
-Outputs: `scope-status`, `test-evidence-status`, `review-packet-status` (`pass`, `warn`, `error`, or `skipped`), `comment-url`, `head-sha`.
+Outputs: `scope-status`, `test-evidence-status`, `review-packet-status`, `claims-status` (`pass`, `warn`, `error`, or `skipped`), `comment-url`, `head-sha`.
 
 The workflow also gets a job summary with the same body as the comment.
 
@@ -215,6 +274,7 @@ The workflow also gets a job summary with the same body as the comment.
 - Test counts are the last summary in the job log. A runner this action does not know still counts as evidence that a test job ran, without counts.
 - The comment is a snapshot. It does not wait for other workflows. Run it after tests, or let a later `workflow_run` update the same comment.
 - The action does not decide whether the change is correct.
+- Claim phrases are literal patterns. A sentence that does not match a pattern is not a claim. A verified `fixed #12` only means that issue exists and is referenced.
 
 ## Development
 

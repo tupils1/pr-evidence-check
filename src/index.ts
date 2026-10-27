@@ -11,6 +11,7 @@ async function main(): Promise<void> {
       io: {
         info: (message) => core.info(message),
         warning: (message) => core.warning(message),
+        error: (message) => core.error(message),
         setOutput: (name, value) => core.setOutput(name, value),
         writeSummary: async (markdown) => {
           core.summary.emptyBuffer()

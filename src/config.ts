@@ -1,7 +1,14 @@
 import { readFileSync } from 'node:fs'
 import YAML from 'js-yaml'
+import {
+  DEFAULT_BREAKING_PATTERNS,
+  DEFAULT_BUILD_PATTERNS,
+  DEFAULT_CLAIM_PATTERNS,
+  DEFAULT_LINT_PATTERNS,
+  DEFAULT_TEST_PATHS,
+} from './claims/defaults'
 import { ActionFailure } from './errors'
-import type { Config, FailOn, Language, ReviewPacketConfig, SensitiveReason } from './types'
+import type { ClaimEvidenceKind, ClaimPatternConfig, Config, FailOn, Language, ReviewPacketConfig, SensitiveReason } from './types'
 
 const DEFAULT_KEYWORDS = [
   'close',
@@ -64,7 +71,7 @@ export function defaultHeadings(): ReviewPacketConfig['headings'] {
 export function defaultConfig(): Config {
   return {
     language: 'en',
-    checks: { scope: true, testEvidence: true, reviewPacket: true },
+    checks: { scope: true, testEvidence: true, reviewPacket: true, claims: true },
     scope: {
       largeDiffLines: 400,
       largeDiffFiles: 20,
@@ -93,6 +100,15 @@ export function defaultConfig(): Config {
       minBodyChars: 8,
       incomplete: 'warn',
     },
+    claims: {
+      scanCommits: false,
+      contradicted: 'warn',
+      patterns: DEFAULT_CLAIM_PATTERNS.map((pattern) => ({ ...pattern, patterns: [...pattern.patterns] })),
+      lintNamePatterns: [...DEFAULT_LINT_PATTERNS],
+      buildNamePatterns: [...DEFAULT_BUILD_PATTERNS],
+      breakingNamePatterns: [...DEFAULT_BREAKING_PATTERNS],
+      testPaths: [...DEFAULT_TEST_PATHS],
+    },
   }
 }
 
@@ -114,18 +130,19 @@ export function loadConfig(
     throw new ActionFailure('misconfigured', `${fileLabel} must be a YAML mapping.`)
   }
   const config = defaultConfig()
-  warnUnknown(raw, ['language', 'checks', 'scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket'], fileLabel, warn)
+  warnUnknown(raw, ['language', 'checks', 'scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims'], fileLabel, warn)
 
   if ('language' in raw) config.language = expectLanguage(raw.language, 'language')
   const checks = pick(raw, 'checks')
   if (checks !== undefined) {
     if (!isRecord(checks)) throw new ActionFailure('misconfigured', 'checks must be a mapping.')
-    warnUnknown(checks, ['scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket'], 'checks', warn)
+    warnUnknown(checks, ['scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims'], 'checks', warn)
     if ('scope' in checks) config.checks.scope = expectBoolean(checks.scope, 'checks.scope')
     const testFlag = firstDefined(checks, 'test-evidence', 'testEvidence')
     if (testFlag !== undefined) config.checks.testEvidence = expectBoolean(testFlag, 'checks.test-evidence')
     const packetFlag = firstDefined(checks, 'review-packet', 'reviewPacket')
     if (packetFlag !== undefined) config.checks.reviewPacket = expectBoolean(packetFlag, 'checks.review-packet')
+    if ('claims' in checks) config.checks.claims = expectBoolean(checks.claims, 'checks.claims')
   }
 
   const scope = pick(raw, 'scope')
@@ -134,6 +151,7 @@ export function loadConfig(
   if (evidence !== undefined) applyEvidence(config, evidence, warn)
   const packet = firstDefined(raw, 'review-packet', 'reviewPacket')
   if (packet !== undefined) applyPacket(config, packet, warn)
+  if ('claims' in raw) applyClaims(config, raw.claims, warn)
 
   validatePatterns(config)
   return config
@@ -329,9 +347,78 @@ function applyPacket(config: Config, value: unknown, warn: (message: string) => 
   }
 }
 
+function applyClaims(config: Config, value: unknown, warn: (message: string) => void): void {
+  if (!isRecord(value)) throw new ActionFailure('misconfigured', 'claims must be a mapping.')
+  const known = [
+    'scan-commits',
+    'scanCommits',
+    'contradicted',
+    'patterns',
+    'lint-name-patterns',
+    'lintNamePatterns',
+    'build-name-patterns',
+    'buildNamePatterns',
+    'breaking-name-patterns',
+    'breakingNamePatterns',
+    'test-paths',
+    'testPaths',
+  ]
+  warnUnknown(value, known, 'claims', warn)
+  const scan = firstDefined(value, 'scan-commits', 'scanCommits')
+  if (scan !== undefined) config.claims.scanCommits = expectBoolean(scan, 'claims.scan-commits')
+  if ('contradicted' in value) config.claims.contradicted = expectSeverity(value.contradicted, 'claims.contradicted')
+  if ('patterns' in value) config.claims.patterns = expectClaimPatterns(value.patterns)
+  const lint = firstDefined(value, 'lint-name-patterns', 'lintNamePatterns')
+  if (lint !== undefined) config.claims.lintNamePatterns = expectPatternList('claims.lint-name-patterns', lint)
+  const build = firstDefined(value, 'build-name-patterns', 'buildNamePatterns')
+  if (build !== undefined) config.claims.buildNamePatterns = expectPatternList('claims.build-name-patterns', build)
+  const breaking = firstDefined(value, 'breaking-name-patterns', 'breakingNamePatterns')
+  if (breaking !== undefined) config.claims.breakingNamePatterns = expectPatternList('claims.breaking-name-patterns', breaking)
+  const paths = firstDefined(value, 'test-paths', 'testPaths')
+  if (paths !== undefined) config.claims.testPaths = expectPatternList('claims.test-paths', paths)
+}
+
+const CLAIM_EVIDENCE: readonly ClaimEvidenceKind[] = ['tests', 'lint', 'build', 'breaking', 'test_files', 'linked_issue']
+
+function expectClaimPatterns(value: unknown): ClaimPatternConfig[] {
+  if (!Array.isArray(value)) throw new ActionFailure('misconfigured', 'claims.patterns must be a list.')
+  const ids = new Set<string>()
+  return value.map((item, index) => {
+    if (!isRecord(item)) throw new ActionFailure('misconfigured', `claims.patterns[${index}] must be a mapping.`)
+    const id = typeof item.id === 'string' ? item.id.trim() : ''
+    if (!id) throw new ActionFailure('misconfigured', `claims.patterns[${index}].id must be a non-empty string.`)
+    if (ids.has(id)) throw new ActionFailure('misconfigured', `claims.patterns id "${id}" is duplicated.`)
+    ids.add(id)
+    const evidence = item.evidence
+    if (typeof evidence !== 'string' || !CLAIM_EVIDENCE.includes(evidence as ClaimEvidenceKind)) {
+      throw new ActionFailure(
+        'misconfigured',
+        `claims.patterns[${index}].evidence must be tests, lint, build, breaking, test_files, or linked_issue.`,
+      )
+    }
+    const patterns = expectPatternList(`claims.patterns[${index}].patterns`, item.patterns)
+    return { id, evidence: evidence as ClaimEvidenceKind, patterns }
+  })
+}
+
+function expectPatternList(label: string, value: unknown): string[] {
+  const list = expectStringArray(label, value).map((item) => item.trim()).filter((item) => item.length > 0)
+  if (list.length === 0) throw new ActionFailure('misconfigured', `${label} must list at least one pattern.`)
+  return list
+}
+
 function validatePatterns(config: Config): void {
-  for (const pattern of [...config.testEvidence.jobNamePatterns, ...config.testEvidence.excludeNamePatterns]) {
+  for (const pattern of [
+    ...config.testEvidence.jobNamePatterns,
+    ...config.testEvidence.excludeNamePatterns,
+    ...config.claims.lintNamePatterns,
+    ...config.claims.buildNamePatterns,
+    ...config.claims.breakingNamePatterns,
+  ]) {
     compilePattern(pattern)
+  }
+  for (const claim of config.claims.patterns) {
+    for (const pattern of claim.patterns) compilePattern(pattern)
   }
 }
 

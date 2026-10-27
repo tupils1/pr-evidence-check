@@ -61,6 +61,10 @@ class FakeClient {
   commentError?: string
   logText = 'Tests:       4 passed, 4 total\nSECRET_TOKEN=abc'
   listFilesCalled = 0
+  commitReads = 0
+  commitError = ''
+  commits: { sha: string; message: string }[] = []
+  fetchedIssues = new Map<number, LinkedIssue | null>()
 
   client(): GitHubClient {
     return {
@@ -72,7 +76,15 @@ class FakeClient {
         return this.files
       },
       listClosingIssues: async () => ({ issues: this.issues }),
-      getIssue: async () => null,
+      getIssue: async (_repo, number) => {
+        if (this.fetchedIssues.has(number)) return this.fetchedIssues.get(number) ?? null
+        return null
+      },
+      listPullCommits: async () => {
+        this.commitReads += 1
+        if (this.commitError) throw new Error(this.commitError)
+        return this.commits
+      },
       listCheckRuns: async () => this.checks,
       listWorkflowJobs: async () => this.jobs,
       getJobLog: async () => ({ text: this.logText }),
@@ -109,6 +121,7 @@ function io(): ActionIO & { outputs: Record<string, string>; summary: string; wa
     },
     info: (message) => infos.push(message),
     warning: (message) => warnings.push(message),
+    error: (message) => warnings.push(`error: ${message}`),
     setOutput: (name, value) => {
       outputs[name] = value
     },
@@ -248,7 +261,7 @@ describe('run', () => {
 
   it('does not list files when scope is disabled, and still comments if the files API fails', async () => {
     const disabled = new FakeClient()
-    disabled.configText = 'checks:\n  scope: false\n'
+    disabled.configText = 'checks:\n  scope: false\n  claims: false\n'
     await run({ io: io(), input: input(), createClient: () => disabled.client(), now: () => new Date('2026-10-27T00:00:00.000Z') })
     expect(disabled.listFilesCalled).toBe(0)
 
@@ -329,6 +342,120 @@ describe('run', () => {
     })
     expect(fake.comments[0]?.body).toContain('test_evidence.sha_mismatch')
     expect(fake.comments[0]?.body).toContain('PR 证据')
+  })
+
+  it('warns when a claim is contradicted and does not fail unless fail-on says so', async () => {
+    const fake = new FakeClient()
+    fake.issues = []
+    fake.jobs = [{ id: 3, name: 'unit', workflowName: 'CI', status: 'completed', conclusion: 'failure', runId: 2 }]
+    fake.configText = 'checks:\n  scope: false\n  test-evidence: false\n'
+    fake.pullOverrides = {
+      title: 'Demo',
+      body: [
+        'All tests pass.',
+        '## Intent',
+        'Show a contradicted test claim.',
+        '## Risks',
+        'The unit job is red.',
+        '## Tests run',
+        'Watched the unit job.',
+        '## Self-verification',
+        'Read the failing assertion.',
+      ].join('\n'),
+    }
+    const actions = io()
+    await expect(run({
+      io: actions,
+      input: input({ failOn: 'none' }),
+      createClient: () => fake.client(),
+      now: () => new Date('2026-10-27T00:00:00.000Z'),
+    })).resolves.toMatchObject({ commentUrl: 'https://example.test/comment/10' })
+    expect(actions.outputs['claims-status']).toBe('warn')
+    expect(actions.outputs['test-evidence-status']).toBe('skipped')
+    expect(fake.commitReads).toBe(0)
+    expect(fake.comments[0]?.body).toContain('contradicted')
+    expect(actions.warnings.some((warning) => warning.includes('All tests pass'))).toBe(true)
+
+    await expect(run({
+      io: io(),
+      input: input({ failOn: 'warning' }),
+      createClient: () => fake.client(),
+      now: () => new Date('2026-10-27T00:00:00.000Z'),
+    })).rejects.toMatchObject({ kind: 'threshold', message: expect.stringContaining('claims=warn') })
+  })
+
+  it('scans commit messages only when claims.scan-commits is set', async () => {
+    const fake = new FakeClient()
+    fake.issues = []
+    fake.files = [{ filename: 'README.md', status: 'modified', additions: 2, deletions: 0 }]
+    fake.jobs = [{ id: 4, name: 'lint', workflowName: 'CI', status: 'completed', conclusion: 'success', runId: 3 }]
+    fake.commits = [{ sha: 'abc1234fff', message: 'lint clean' }]
+    fake.configText = 'checks:\n  scope: false\nclaims:\n  scan-commits: true\n'
+    fake.pullOverrides = {
+      title: 'Demo',
+      body: [
+        '## Intent',
+        'The claim is only in the commit message.',
+        '## Risks',
+        'None for this fixture.',
+        '## Tests run',
+        'No test claim is made here.',
+        '## Self-verification',
+        'Checked the commit subject.',
+      ].join('\n'),
+    }
+    const actions = io()
+    await run({
+      io: actions,
+      input: input(),
+      createClient: () => fake.client(),
+      now: () => new Date('2026-10-27T00:00:00.000Z'),
+    })
+    expect(fake.commitReads).toBe(1)
+    expect(actions.outputs['claims-status']).toBe('pass')
+    expect(fake.comments[0]?.body).toContain('verified')
+    expect(fake.comments[0]?.body).toContain('commit `abc1234`')
+  })
+
+  it('verifies a numbered fix when the issue exists and warns if commits cannot be read', async () => {
+    const fake = new FakeClient()
+    fake.issues = []
+    fake.files = [{ filename: 'README.md', status: 'modified', additions: 1, deletions: 0 }]
+    fake.fetchedIssues.set(8, {
+      repo: 'acme/app',
+      number: 8,
+      title: 'Real bug',
+      body: 'details',
+      url: 'https://github.com/acme/app/issues/8',
+      source: 'closing_keyword',
+    })
+    fake.commitError = 'commits unavailable'
+    fake.configText = 'checks:\n  scope: false\nclaims:\n  scan-commits: true\n'
+    fake.pullOverrides = {
+      title: 'Demo',
+      body: [
+        '已修复 #8',
+        '## Intent',
+        'Point at an existing issue.',
+        '## Risks',
+        'The Chinese keyword does not auto-close.',
+        '## Tests run',
+        'No test claim.',
+        '## Self-verification',
+        'Looked up issue 8.',
+      ].join('\n'),
+    }
+    const actions = io()
+    await run({
+      io: actions,
+      input: input(),
+      createClient: () => fake.client(),
+      now: () => new Date('2026-10-27T00:00:00.000Z'),
+    })
+    expect(actions.outputs['claims-status']).toBe('pass')
+    expect(fake.comments[0]?.body).toContain('verified')
+    expect(fake.comments[0]?.body).toContain('Real bug')
+    expect(actions.warnings.some((warning) => warning.includes('commits unavailable'))).toBe(true)
   })
 
   it('warns and uses defaults when the base config cannot be read', async () => {

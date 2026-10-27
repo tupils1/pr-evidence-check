@@ -158,6 +158,8 @@ describe('github client', () => {
     expect((await client.createComment(7, 'hi')).url).toContain('comment/8')
     expect((await client.updateComment(3, 'hi')).id).toBe(3)
     expect(calls.some((call) => call.includes('page=2'))).toBe(true)
+    const commits = await client.listPullCommits(7)
+    expect(commits).toEqual([])
   })
 
   it('turns missing config and missing issues into empty results, and HTTP errors into thrown status', async () => {
@@ -179,6 +181,17 @@ describe('github client', () => {
       repo: 'app',
       transport: transport(async () => ({ status: 200, data: {} })),
     })
+    const commits = createGitHubClient({
+      owner: 'acme',
+      repo: 'app',
+      transport: transport(async (route) => {
+        if (route.endsWith('/commits')) {
+          return { status: 200, data: [{ sha: 'abc1234fff', commit: { message: 'lint clean' } }, { foo: 1 }] }
+        }
+        return { status: 404, data: {} }
+      }),
+    })
+    expect(await commits.listPullCommits(7)).toEqual([{ sha: 'abc1234fff', message: 'lint clean' }])
     expect((await broken.listClosingIssues(1)).error).toMatch(/graphql failed/)
     expect(await broken.getJobLog(1, 10)).toEqual({ text: null, error: 'log download is not configured' })
   })

@@ -2,7 +2,7 @@
 
 给维护者用的免费 GitHub Action，用来看 pull request，包括代理生成的 pull request。它只发 **一条评论**，之后每次都在原地更新这一条。
 
-三项检查都是确定规则。不调用 LLM，也不把代码送到模型 API。除了读取 pull request、关联 issue 和已经跑完的 CI，runner 不向外发送仓库内容。
+四项检查都是确定规则。不调用 LLM，也不把代码送到模型 API。除了读取 pull request、关联 issue 和已经跑完的 CI，runner 不向外发送仓库内容。声明核验是尚未发布的 v1.1 检查。`v1` 和 `v1.0.0` 标签里没有它。
 
 **零配置。** 不需要 `.github/pr-evidence.yml`。没有这个文件就用内置默认值。
 
@@ -10,7 +10,29 @@
 
 ![超出范围的 pull request 上的粘性评论](docs/scope-comment.png)
 
-上图是 [pull request #9](https://github.com/tupils1/pr-evidence-check/pull/9#issuecomment-6445101391) 的粘性评论。范围是 error，测试证据和审查材料包通过。之后的运行仍更新这一条。
+上图是 [pull request #9](https://github.com/tupils1/pr-evidence-check/pull/9#issuecomment-6445101391) 的粘性评论。范围是 error，测试证据和审查材料包通过。之后的运行仍更新这一条。截图来自带标签的 v1 评论，当时还没有声明核验。
+
+## Unreleased / v1.1
+
+声明核验在这个分支上，**不在** `v1` 和 `v1.0.0` 标签里。这两个标签仍只跑下面三项检查。仓库没有 v1.1 发行版。
+
+action 读取 PR 标题和描述。`claims.scan-commits` 为 true 时也读提交说明。每条配置好的短语，都只用这个 head SHA 上 action 已经收集的数据：像测试的 job 和解析出的数量、其他 check run 和 job、diff、关联 issue。每条声明标成 **已证实**、**相矛盾** 或 **未证实**，写进同一条粘性评论的新小节。规则是确定的，不调用 LLM。
+
+| 短语 | 证据 | 已证实 | 相矛盾 | 未证实 |
+| --- | --- | --- | --- | --- |
+| `all tests pass`、`tests passing`、`tests pass`、`测试全部通过` | 像测试的 job 和解析数量 | 命中的 job 成功，且解析出的失败数为 0 | job 失败、超时或取消，或解析出的失败数大于 0 | 没有已结束的测试 job、job 还在跑，或解析总数为 0 |
+| `lint clean`、`已通过 lint` | 名称命中 lint 模式的 job 或 check | lint 检查成功 | lint 检查失败 | 没有成功的 lint 检查 |
+| `build succeeds` | 构建名称模式 | 构建检查成功 | 构建检查失败 | 没有成功的构建检查 |
+| `no breaking changes`、`no breaking change`、`无破坏性变更`、`没有破坏性变更` | 破坏性变更名称模式 | 这类检查成功 | 这类检查失败 | 没有这类检查 |
+| `added tests`、`新增了测试`、`添加了测试`、`新增测试` | diff 路径 | 有测试文件被新增或增加了行 | diff 能读到，但没有新增或增加行数的测试文件 | diff 读不到 |
+| `fixed #12`、`fixes #12`、`fix #12`、`已修复 #12` | 关联 issue | 该 issue 存在，且这个 PR 提到了它 | 该编号不存在 | issue 读不到 |
+| `已修复` | 关联 issue | 至少有一个关联 issue 能读到 | — | 没有能读到的关联 issue |
+
+`claims.contradicted` 默认是 `warn`。除非 `fail-on` 是 `warning` 或 `error`，job 仍然成功。`claims.scan-commits` 默认 false。被否定的短语（`not all tests pass`、`没有测试全部通过`）会忽略。围栏代码块和 HTML 注释会忽略。`.github/pr-evidence.yml` 里的 `patterns` 列表会替换内置短语。模式是 JavaScript 正则，开头的 `(?i)` 表示不区分大小写。`linked_issue` 的模式可以用第一个捕获组取出 issue 编号。
+
+这不证明 diff 是对的。`fixed #12` 只说明 issue 存在并且被引用，不说明改动修好了它。没有名称像破坏性变更的检查时，`no breaking changes` 保持未证实。`all tests pass` 信任已有 CI 结论和解析数量，不会重新跑测试。
+
+[AgentClaimGuard](https://github.com/konoeph/AgentClaimGuard) 是 Python 策略门，核对结构化声明和调用方提供的证据。[agent-receipts](https://github.com/inchwormz/agent-receipts) 是本地哈希链运行时，只有仓库检查绑定到精确字节时才提升声明。[obsigna](https://github.com/agent-receipts/obsigna) 验证已签名的收据链。这个 action 不签名，也不要求代理配合。它只把 PR 上已经写下的短语和 CI、diff、关联 issue 对照，默认警告，不阻断。
 
 ## 检查什么
 
@@ -45,6 +67,10 @@ job 名称模式可以改。默认能认出 `test`、`unit`、`e2e`、`jest`、`
 PR 描述里应有四节：**Intent**、**Risks**、**Tests run**、**Self-verification**。中英文标题都算（`意图`、`风险`、`已运行测试`、`本人验证`，以及默认配置里的其他别名）。HTML 注释和 `TODO`、`待补充` 这类占位不算正文。
 
 [`.github/pull_request_template.md`](.github/pull_request_template.md) 是中英双语模板。
+
+### 4. 声明核验
+
+见 [Unreleased / v1.1](#unreleased--v11)。标题、描述和可选的提交说明里的短语，会在同一条粘性评论里标成已证实、相矛盾或未证实。相矛盾的声明是警告。除非设置了 `fail-on`，不会因此让 job 失败。
 
 ## 接上
 
@@ -151,6 +177,7 @@ npm run demo
 | 这个 SHA 上没有像测试的 job 或 check | info |
 | 命中的测试 job 失败、超时或取消 | warn |
 | 审查材料包缺节、过短或只有占位 | warn |
+| 有声明与证据相矛盾 | warn。`claims.contradicted: error` 会把这项升为 error。未证实的声明仍算在通过的检查里 |
 
 `test-evidence.require-passed: true` 会把失败的测试 job 升为 error。`test-evidence.no-evidence: warn` 或 `error` 会把默认的 info（没有测试 job）升高。`review-packet.incomplete: error` 会把不完整的审查材料包升为 error。如果你设置了 `fail-on`，又在分支保护里把这个 job 标成必需，GitHub 会挡住合并。这是可选的。默认不会挡。
 
@@ -165,6 +192,7 @@ checks:
   scope: true
   test-evidence: true
   review-packet: true
+  claims: true
 
 scope:
   large-diff-lines: 400
@@ -187,6 +215,15 @@ test-evidence:
 review-packet:
   min-body-chars: 8
   incomplete: warn
+
+claims:
+  scan-commits: false # 同时读取提交说明
+  contradicted: warn # warn 或 error。除非设置了 fail-on，不会让 job 失败。
+  # patterns: # 写了列表就会替换内置短语
+  #   - id: tests_pass
+  #     evidence: tests # tests、lint、build、breaking、test_files 或 linked_issue
+  #     patterns:
+  #       - "(?i)(?<![A-Za-z])all tests pass(?![A-Za-z])"
 ```
 
 action 的 `comment-language` 覆盖 `language`。`fail-on` 是 action 输入，不是配置项，因为让 job 失败是 workflow 的决定。
@@ -204,7 +241,7 @@ job 名称模式是 JavaScript 正则。开头的 `(?i)` 表示这条模式不�
 | `fail-on` | `none` | `none`、`warning` 或 `error`。 |
 | `comment-language` | 空 | `en` 或 `zh`。空则用配置文件，配置默认 `en`。 |
 
-输出：`scope-status`、`test-evidence-status`、`review-packet-status`（`pass`、`warn`、`error` 或 `skipped`）、`comment-url`、`head-sha`。
+输出：`scope-status`、`test-evidence-status`、`review-packet-status`、`claims-status`（`pass`、`warn`、`error` 或 `skipped`）、`comment-url`、`head-sha`。
 
 workflow 的 job summary 与评论正文相同。
 
@@ -215,6 +252,7 @@ workflow 的 job summary 与评论正文相同。
 - 测试数量取 job 日志里最后一条汇总。不认识的 runner 仍然说明有一个测试 job 跑过，只是没有数量。
 - 评论是当时的快照，不会干等别的 workflow。放在测试后面跑，或用之后的 `workflow_run` 更新同一条评论。
 - 它不判断改动对不对。
+- 声明短语是字面模式。对不上模式的句子不是声明。已证实的 `fixed #12` 只说明该 issue 存在并且被引用。
 
 ## 开发
 
