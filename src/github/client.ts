@@ -30,6 +30,7 @@ export interface GitHubClient {
   listCheckRuns(sha: string): Promise<CheckRunInfo[]>
   listWorkflowJobs(sha: string): Promise<WorkflowJobInfo[]>
   getJobLog(jobId: number, maxChars: number): Promise<{ text: string | null; error?: string }>
+  listPullCommits(number: number): Promise<{ sha: string; message: string }[]>
   listComments(number: number): Promise<{ id: number; body: string }[]>
   createComment(number: number, body: string): Promise<{ id: number; url: string }>
   updateComment(id: number, body: string): Promise<{ id: number; url: string }>
@@ -178,6 +179,8 @@ export function createGitHubClient(options: {
         const runId = asNumber(record?.id)
         if (!runId) continue
         const workflowName = asString(record?.name) ?? ''
+        const event = asString(record?.event) ?? ''
+        const runUpdatedAt = asString(record?.updated_at)
         const rows = await paginate(transport, 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs', {
           owner,
           repo,
@@ -187,7 +190,7 @@ export function createGitHubClient(options: {
           return Array.isArray(body?.jobs) ? body.jobs : []
         }, 100)
         for (const row of rows) {
-          const job = toWorkflowJob(row, workflowName, runId)
+          const job = toWorkflowJob(row, workflowName, runId, event, runUpdatedAt)
           if (job) jobs.push(job)
           if (jobs.length >= 200) return jobs
         }
@@ -206,6 +209,21 @@ export function createGitHubClient(options: {
         repo,
         jobId,
         maxChars,
+      })
+    },
+
+    async listPullCommits(number) {
+      const rows = await paginate(transport, 'GET /repos/{owner}/{repo}/pulls/{pull_number}/commits', {
+        owner,
+        repo,
+        pull_number: number,
+      }, (data) => (Array.isArray(data) ? data : []), 100)
+      return rows.flatMap((row) => {
+        const record = asRecord(row)
+        const commit = asRecord(record?.commit)
+        const sha = asString(record?.sha)
+        if (!sha) return []
+        return [{ sha, message: asString(commit?.message) ?? '' }]
       })
     },
 
@@ -317,18 +335,28 @@ function toCheckRun(value: unknown): CheckRunInfo {
   }
 }
 
-function toWorkflowJob(value: unknown, workflowName: string, runId: number): WorkflowJobInfo | undefined {
+function toWorkflowJob(
+  value: unknown,
+  workflowName: string,
+  runId: number,
+  event: string,
+  runUpdatedAt: string | undefined,
+): WorkflowJobInfo | undefined {
   const record = asRecord(value)
   const id = asNumber(record?.id)
   if (!id) return undefined
+  const status = asString(record?.status) ?? 'completed'
+  const completedAt = asString(record?.completed_at) ?? (status === 'completed' ? runUpdatedAt : undefined)
   return {
     id,
     name: asString(record?.name) ?? '',
     workflowName,
-    status: asString(record?.status) ?? 'completed',
+    status,
     conclusion: typeof record?.conclusion === 'string' ? record.conclusion : null,
     ...(asString(record?.html_url) ? { htmlUrl: asString(record?.html_url) } : {}),
     runId,
+    ...(event ? { event } : {}),
+    ...(completedAt ? { completedAt } : {}),
   }
 }
 

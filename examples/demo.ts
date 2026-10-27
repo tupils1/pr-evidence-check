@@ -1,3 +1,5 @@
+import { parseClaims } from '../src/claims/parse'
+import { verifyClaims } from '../src/claims/verify'
 import { defaultConfig } from '../src/config'
 import { buildEvidence } from '../src/evidence/select'
 import { analyzePacket } from '../src/packet/analyze'
@@ -51,17 +53,37 @@ const evidence = buildEvidence({
   }],
 })
 
-const packet = analyzePacket(
-  [
-    '## Intent',
-    'Refresh the session token before login gives up.',
-    '## Risks',
-    'TODO',
-    '## 已运行测试',
-    '',
-  ].join('\n'),
-  config.reviewPacket,
-)
+const description = [
+  '## Intent',
+  'Refresh the session token before login gives up.',
+  '## Risks',
+  'TODO',
+  '## 已运行测试',
+  '',
+  'All tests pass. Added tests. No breaking changes. Fixes #12.',
+].join('\n')
+
+const packet = analyzePacket(description, config.reviewPacket)
+const claims = verifyClaims({
+  claims: parseClaims({
+    title: 'Refresh sessions',
+    body: description,
+    patterns: config.claims.patterns,
+    scanCommits: false,
+  }),
+  config: config.claims,
+  testJobs: evidence.jobs,
+  jobs: [],
+  checks: [],
+  files: [
+    { filename: 'src/auth/login.ts', status: 'modified', additions: 40, deletions: 2 },
+    { filename: 'src/billing/invoice.ts', status: 'modified', additions: 220, deletions: 80 },
+  ],
+  issues: scope.issues,
+  resolvedIssues: new Map([[12, { number: 12, state: 'found', title: 'Session timeout on login', linked: true }]]),
+  ciError: false,
+  scanCommits: false,
+})
 
 const report: Report = {
   language: 'en',
@@ -71,6 +93,7 @@ const report: Report = {
   scope,
   evidence,
   packet,
+  claims,
 }
 
 process.stdout.write(`${renderComment(report, prRepo)}\n`)

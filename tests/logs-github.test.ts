@@ -116,10 +116,10 @@ describe('github client', () => {
           return { status: 200, data: { check_runs: [{ name: 'unit', status: 'completed', conclusion: 'success', html_url: 'https://example.test/check', output: { summary: 'Tests: 1 passed, 1 total' } }] } }
         }
         if (route.endsWith('/actions/runs')) {
-          return { status: 200, data: { workflow_runs: [{ id: 5, name: 'CI' }] } }
+          return { status: 200, data: { workflow_runs: [{ id: 5, name: 'CI', event: 'pull_request', updated_at: '2026-10-27T15:51:00Z' }] } }
         }
         if (route.includes('/jobs')) {
-          return { status: 200, data: { jobs: [{ id: 9, name: 'unit', status: 'completed', conclusion: 'success', html_url: 'https://example.test/job' }] } }
+          return { status: 200, data: { jobs: [{ id: 9, name: 'unit', status: 'completed', conclusion: 'success', html_url: 'https://example.test/job', completed_at: '2026-10-27T15:50:30Z' }] } }
         }
         if (route.includes('/issues/{issue_number}') && route.startsWith('GET')) {
           return { status: 200, data: [{ id: 3, body: '<!-- pr-evidence-check -->\nold' }] }
@@ -152,12 +152,19 @@ describe('github client', () => {
     expect(files[100]?.previousFilename).toBe('old.ts')
     expect((await client.listClosingIssues(7)).issues.map((item) => item.number)).toEqual([12])
     expect((await client.listCheckRuns(pr.headSha))[0]?.summary).toContain('passed')
-    expect((await client.listWorkflowJobs(pr.headSha))[0]?.workflowName).toBe('CI')
+    expect(await client.listWorkflowJobs(pr.headSha)).toMatchObject([{
+      workflowName: 'CI',
+      event: 'pull_request',
+      completedAt: '2026-10-27T15:50:30Z',
+      runId: 5,
+    }])
     expect((await client.getJobLog(9, 1000)).text).toContain('1 passed')
     expect(await client.listComments(7)).toHaveLength(1)
     expect((await client.createComment(7, 'hi')).url).toContain('comment/8')
     expect((await client.updateComment(3, 'hi')).id).toBe(3)
     expect(calls.some((call) => call.includes('page=2'))).toBe(true)
+    const commits = await client.listPullCommits(7)
+    expect(commits).toEqual([])
   })
 
   it('turns missing config and missing issues into empty results, and HTTP errors into thrown status', async () => {
@@ -179,6 +186,17 @@ describe('github client', () => {
       repo: 'app',
       transport: transport(async () => ({ status: 200, data: {} })),
     })
+    const commits = createGitHubClient({
+      owner: 'acme',
+      repo: 'app',
+      transport: transport(async (route) => {
+        if (route.endsWith('/commits')) {
+          return { status: 200, data: [{ sha: 'abc1234fff', commit: { message: 'lint clean' } }, { foo: 1 }] }
+        }
+        return { status: 404, data: {} }
+      }),
+    })
+    expect(await commits.listPullCommits(7)).toEqual([{ sha: 'abc1234fff', message: 'lint clean' }])
     expect((await broken.listClosingIssues(1)).error).toMatch(/graphql failed/)
     expect(await broken.getJobLog(1, 10)).toEqual({ text: null, error: 'log download is not configured' })
   })

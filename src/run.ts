@@ -1,3 +1,5 @@
+import { parseClaims } from './claims/parse'
+import { confirmedIssue, skippedClaims, verifyClaims, type ResolvedIssue } from './claims/verify'
 import { loadConfig, parseFailOn, parseLanguage } from './config'
 import { resolvePrContext } from './context'
 import { ActionFailure, GitHubHttpError } from './errors'
@@ -8,12 +10,14 @@ import { renderComment, renderSummary } from './render'
 import { analyzeScope, skippedScope } from './scope/analyze'
 import { extractClosingReferences, issueKey, mergeLinkedIssues } from './scope/links'
 import { findSticky } from './sticky'
+import { inlineText } from './text'
 import { thresholdFailure } from './threshold'
-import type { EvidenceItem, LinkedIssue, Report } from './types'
+import type { ChangedFile, CheckRunInfo, EvidenceItem, EvidenceJobReport, LinkedIssue, Report, WorkflowJobInfo } from './types'
 
 export interface ActionIO {
   info(message: string): void
   warning(message: string): void
+  error(message: string): void
   setOutput(name: string, value: string): void
   writeSummary(markdown: string): Promise<void>
 }
@@ -66,15 +70,40 @@ export async function run(deps: {
   })
   const language = parseLanguage(deps.input.commentLanguage) ?? config.language
 
+  const needFiles = config.checks.scope || config.checks.claims
+  const needIssues = config.checks.scope || config.checks.claims
+  const fileResult = needFiles ? await loadFiles(client, pr.number) : undefined
+  const issueResult = needIssues ? await loadLinkedIssues(client, pr, context.number, config, prRepo) : undefined
   const scope = config.checks.scope
-    ? await collectScope(client, pr, context, config, prRepo)
+    ? analyzeScope({
+      prRepo,
+      files: fileResult?.files ?? [],
+      issues: issueResult?.issues ?? [],
+      config: config.scope,
+      authorLogin: pr.authorLogin,
+      authorType: pr.authorType,
+      labels: pr.labels,
+      ...(fileResult?.error || issueResult?.error ? { apiError: fileResult?.error ?? issueResult?.error } : {}),
+      ...(fileResult?.error ? { filesUnavailable: true } : {}),
+    })
     : skippedScope()
-  const evidence = config.checks.testEvidence
-    ? await collectEvidence(client, context.sha, pr.headSha, config)
-    : skippedEvidence(context.sha)
+  const ci = await collectCi(client, context.sha, pr.headSha, config, {
+    evidence: config.checks.testEvidence,
+    claims: config.checks.claims,
+  })
   const packet = config.checks.reviewPacket
     ? analyzePacket(pr.body, config.reviewPacket)
     : skippedPacket()
+  const claims = config.checks.claims
+    ? await collectClaims(client, deps.io, pr, prRepo, config, {
+      files: fileResult?.error ? null : (fileResult?.files ?? null),
+      issues: issueResult?.issues ?? [],
+      testJobs: ci.testJobs,
+      jobs: ci.jobs,
+      checks: ci.checks,
+      ciError: ci.ciError,
+    })
+    : skippedClaims()
 
   const report: Report = {
     language,
@@ -82,8 +111,9 @@ export async function run(deps: {
     headSha: context.sha,
     generatedAt: (deps.now ?? (() => new Date()))().toISOString(),
     scope,
-    evidence,
+    evidence: ci.evidence,
     packet,
+    claims,
   }
   const body = renderComment(report, prRepo)
   let comments
@@ -107,32 +137,48 @@ export async function run(deps: {
   }
 
   deps.io.setOutput('scope-status', scope.status)
-  deps.io.setOutput('test-evidence-status', evidence.status)
+  deps.io.setOutput('test-evidence-status', ci.evidence.status)
   deps.io.setOutput('review-packet-status', packet.status)
+  deps.io.setOutput('claims-status', claims.status)
   deps.io.setOutput('comment-url', posted.url)
   deps.io.setOutput('head-sha', context.sha)
   await deps.io.writeSummary(renderSummary(report, prRepo))
   deps.io.info(`Updated PR evidence comment: ${posted.url}`)
 
+  const contradicted = claims.results.filter((claim) => claim.verdict === 'contradicted')
+  if (contradicted.length > 0) {
+    const message = `Contradicted claim${contradicted.length === 1 ? '' : 's'} (${config.claims.contradicted}): ${contradicted.map((claim) => inlineText(claim.text, 80)).join('; ')}`
+    if (config.claims.contradicted === 'error') deps.io.error(message)
+    else deps.io.warning(message)
+  }
+
   const failure = thresholdFailure(failOn, [
     { name: 'scope', status: scope.status },
-    { name: 'test-evidence', status: evidence.status },
+    { name: 'test-evidence', status: ci.evidence.status },
     { name: 'review-packet', status: packet.status },
+    { name: 'claims', status: claims.status },
   ])
   if (failure) throw new ActionFailure('threshold', failure)
   return { commentUrl: posted.url }
 }
 
-async function collectScope(
+async function loadFiles(client: GitHubClient, number: number): Promise<{ files: ChangedFile[]; error?: string }> {
+  try {
+    return { files: await client.listFiles(number) }
+  } catch (error) {
+    return { files: [], error: errorMessage(error) }
+  }
+}
+
+async function loadLinkedIssues(
   client: GitHubClient,
-  pr: { number: number; title: string; body: string; authorLogin: string; authorType: string; labels: string[] },
-  context: { number: number },
+  pr: { title: string; body: string },
+  number: number,
   config: ReturnType<typeof loadConfig>,
   prRepo: string,
-) {
+): Promise<{ issues: LinkedIssue[]; error?: string }> {
   try {
-    const files = await client.listFiles(pr.number)
-    const linked = await client.listClosingIssues(context.number)
+    const linked = await client.listClosingIssues(number)
     const refs = extractClosingReferences(`${pr.title}\n${pr.body}`, prRepo, config.scope.closingKeywords)
     const known = new Set(linked.issues.map((issue) => issueKey(issue.repo, issue.number)))
     const fetched = new Map<string, LinkedIssue | null>()
@@ -147,34 +193,29 @@ async function collectScope(
     }
     const issues = mergeLinkedIssues(linked.issues, refs, fetched)
     const apiError = issues.length === 0 && linked.error ? linked.error : undefined
-    return analyzeScope({
-      prRepo,
-      files,
-      issues,
-      config: config.scope,
-      authorLogin: pr.authorLogin,
-      authorType: pr.authorType,
-      labels: pr.labels,
-      ...(apiError ? { apiError } : {}),
-    })
+    return { issues, ...(apiError ? { error: apiError } : {}) }
   } catch (error) {
-    return analyzeScope({
-      prRepo,
-      files: [],
-      issues: [],
-      config: config.scope,
-      apiError: errorMessage(error),
-      filesUnavailable: true,
-    })
+    return { issues: [], error: errorMessage(error) }
   }
 }
 
-async function collectEvidence(
+async function collectCi(
   client: GitHubClient,
   eventSha: string,
   apiSha: string,
   config: ReturnType<typeof loadConfig>,
-) {
+  want: { evidence: boolean; claims: boolean },
+): Promise<{
+  evidence: Report['evidence']
+  testJobs: EvidenceJobReport[]
+  jobs: WorkflowJobInfo[]
+  checks: CheckRunInfo[]
+  ciError: boolean
+}> {
+  if (!want.evidence && !want.claims) {
+    return { evidence: skippedEvidence(eventSha), testJobs: [], jobs: [], checks: [], ciError: false }
+  }
+  const mismatch = eventSha !== apiSha ? { shaMismatch: { eventSha, apiSha } } : {}
   try {
     const jobs = await client.listWorkflowJobs(eventSha)
     const checks = await client.listCheckRuns(eventSha)
@@ -201,6 +242,9 @@ async function collectEvidence(
         status: job.status,
         conclusion: job.conclusion,
         ...(job.htmlUrl ? { url: job.htmlUrl } : {}),
+        ...(job.event ? { event: job.event } : {}),
+        ...(job.completedAt ? { completedAt: job.completedAt } : {}),
+        runId: job.runId,
         text,
         ...(logError ? { logError } : {}),
       })
@@ -215,25 +259,115 @@ async function collectEvidence(
         text: check.summary ?? null,
       })
     }
-    return buildEvidence({
+    const parsed = buildEvidence({
       sha: eventSha,
       items,
       config: config.testEvidence,
       consideredJobs: jobs.length,
       consideredChecks: checks.length,
-      ...(eventSha !== apiSha ? { shaMismatch: { eventSha, apiSha } } : {}),
+      ...mismatch,
     })
+    return {
+      evidence: want.evidence ? parsed : skippedEvidence(eventSha),
+      testJobs: parsed.jobs,
+      jobs,
+      checks,
+      ciError: false,
+    }
   } catch (error) {
-    return buildEvidence({
+    const parsed = buildEvidence({
       sha: eventSha,
       items: [],
       config: config.testEvidence,
       apiError: errorMessage(error),
       consideredJobs: 0,
       consideredChecks: 0,
-      ...(eventSha !== apiSha ? { shaMismatch: { eventSha, apiSha } } : {}),
+      ...mismatch,
     })
+    return {
+      evidence: want.evidence ? parsed : skippedEvidence(eventSha),
+      testJobs: [],
+      jobs: [],
+      checks: [],
+      ciError: true,
+    }
   }
+}
+
+async function collectClaims(
+  client: GitHubClient,
+  io: ActionIO,
+  pr: { number: number; title: string; body: string },
+  prRepo: string,
+  config: ReturnType<typeof loadConfig>,
+  evidence: {
+    files: ChangedFile[] | null
+    issues: LinkedIssue[]
+    testJobs: EvidenceJobReport[]
+    jobs: WorkflowJobInfo[]
+    checks: CheckRunInfo[]
+    ciError: boolean
+  },
+): Promise<Report['claims']> {
+  let commits: { sha: string; message: string }[] = []
+  let scannedCommits = false
+  if (config.claims.scanCommits) {
+    try {
+      commits = await client.listPullCommits(pr.number)
+      scannedCommits = true
+    } catch (error) {
+      io.warning(`Could not read pull request commits: ${errorMessage(error)}. Commit messages were not scanned.`)
+    }
+  }
+  const parsed = parseClaims({
+    title: pr.title,
+    body: pr.body,
+    commits,
+    patterns: config.claims.patterns,
+    scanCommits: scannedCommits,
+  })
+  const resolvedIssues = await resolveClaimIssues(client, prRepo, parsed, evidence.issues)
+  return verifyClaims({
+    claims: parsed,
+    config: config.claims,
+    testJobs: evidence.testJobs,
+    jobs: evidence.jobs,
+    checks: evidence.checks,
+    files: evidence.files,
+    issues: evidence.issues,
+    resolvedIssues,
+    ciError: evidence.ciError,
+    scanCommits: scannedCommits,
+  })
+}
+
+async function resolveClaimIssues(
+  client: GitHubClient,
+  prRepo: string,
+  claims: readonly { issueNumber?: number }[],
+  issues: readonly LinkedIssue[],
+): Promise<Map<number, ResolvedIssue>> {
+  const resolved = new Map<number, ResolvedIssue>()
+  const numbers = [...new Set(claims.flatMap((claim) => claim.issueNumber == null ? [] : [claim.issueNumber]))]
+  for (const number of numbers) {
+    const known = issues.filter((issue) => issue.number === number && issue.repo.toLowerCase() === prRepo.toLowerCase())
+    const confirmed = known.find(confirmedIssue)
+    if (confirmed) {
+      resolved.set(number, { number, state: 'found', title: confirmed.title, linked: true })
+      continue
+    }
+    try {
+      const loaded = await client.getIssue(prRepo, number)
+      if (!loaded) {
+        resolved.set(number, { number, state: 'missing', title: '', linked: known.length > 0 })
+        continue
+      }
+      resolved.set(number, { number, state: 'found', title: loaded.title, linked: known.length > 0 })
+    } catch {
+      resolved.set(number, { number, state: 'error', title: '', linked: known.length > 0 })
+    }
+  }
+  return resolved
 }
 
 function commentFailure(number: number, error: unknown): ActionFailure {

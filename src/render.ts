@@ -1,6 +1,11 @@
 import { sensitiveReasonLabel } from './config'
 import { cell, inlineText, issueLabel, shortSha } from './text'
 import type {
+  CheckClaimKind,
+  ClaimReason,
+  ClaimReport,
+  ClaimResult,
+  ClaimVerdict,
   EvidenceJobReport,
   EvidenceReport,
   EvidenceSignal,
@@ -20,7 +25,7 @@ export const MARKER = '<!-- pr-evidence-check -->'
 const FILE_LIMIT = 40
 
 export function renderComment(report: Report, prRepo: string): string {
-  const statusLine = `<!-- pr-evidence-check scope=${report.scope.status} test-evidence=${report.evidence.status} review-packet=${report.packet.status} -->`
+  const statusLine = `<!-- pr-evidence-check scope=${report.scope.status} test-evidence=${report.evidence.status} review-packet=${report.packet.status} claims=${report.claims.status} -->`
   const body = renderBody(report, prRepo)
   return `${MARKER}\n${statusLine}\n${body}`
 }
@@ -42,6 +47,8 @@ function renderBody(report: Report, prRepo: string): string {
     renderEvidence(report.evidence, lang),
     '',
     renderPacket(report.packet, lang),
+    '',
+    renderClaims(report.claims, lang),
     '',
     footer(report, lang),
   ]
@@ -73,6 +80,7 @@ function statusTable(report: Report, lang: Language): string {
     [lang === 'zh' ? '范围与关联 issue' : 'Scope vs linked issue', statusWord(report.scope.status, lang)],
     [lang === 'zh' ? '测试证据（已有 CI）' : 'Test evidence (existing CI)', statusWord(report.evidence.status, lang)],
     [lang === 'zh' ? '审查材料包' : 'Review packet', statusWord(report.packet.status, lang)],
+    [lang === 'zh' ? '声明核验' : 'Claim verification', statusWord(report.claims.status, lang)],
   ]
   return markdownTable(headers, rows.map((row) => row.map((value) => `**${value}**`)))
 }
@@ -167,6 +175,169 @@ function renderPacket(packet: PacketReport, lang: Language): string {
   ])
   lines.push(markdownTable(headers, rows))
   return lines.join('\n')
+}
+
+function renderClaims(claims: ClaimReport, lang: Language): string {
+  const title = lang === 'zh' ? '### 声明核验' : '### Claim verification'
+  if (!claims.enabled) {
+    return `${title} · ${statusWord('skipped', lang)}\n\n${lang === 'zh' ? '已在配置中关闭。' : 'Disabled in config.'}`
+  }
+  const lines: string[] = [`${title} · ${statusWord(claims.status, lang)}`, '']
+  lines.push(lang === 'zh'
+    ? '用确定的短语规则核对 PR 标题、描述'
+      + (claims.scannedCommits ? '和提交说明' : '')
+      + '。证据只来自这个 head SHA 上已经收集的 CI job、解析出的测试数量、diff 和关联 issue。不调用 LLM，也不重新跑测试。'
+    : 'Matches configured phrases in the pull request title and description'
+      + (claims.scannedCommits ? ' and in commit messages' : '')
+      + '. Evidence is the CI jobs, parsed test counts, diff, and linked issues already collected for this head SHA. No LLM, and tests were not re-run.')
+  if (claims.results.length === 0) {
+    lines.push('', lang === 'zh'
+      ? '标题和描述里没有命中已配置的声明。'
+      : 'No configured claim was found in the title or description.')
+    return lines.join('\n')
+  }
+  if (claims.omitted > 0) {
+    lines.push('', lang === 'zh'
+      ? `只列出前 ${claims.results.length} 条，另有 ${claims.omitted} 条未列出。`
+      : `Showing the first ${claims.results.length} claims. ${claims.omitted} more were omitted.`)
+  }
+  lines.push('')
+  const headers = lang === 'zh' ? ['声明', '位置', '结果', '证据'] : ['Claim', 'Where', 'Result', 'Evidence']
+  const rows = claims.results.map((claim) => [
+    `\`${cell(claim.text)}\``,
+    claimWhere(claim, lang),
+    verdictWord(claim.verdict, lang),
+    claimEvidence(claim.reason, lang),
+  ])
+  lines.push(markdownTable(headers, rows))
+  lines.push('', lang === 'zh'
+    ? '相矛盾的声明默认是警告。除非 workflow 把 `fail-on` 设成 `warning` 或 `error`，否则不会因此让 job 失败。'
+    : 'Contradicted claims are warnings by default. They do not fail the job unless `fail-on` is `warning` or `error`.')
+  return lines.join('\n')
+}
+
+function claimWhere(claim: ClaimResult, lang: Language): string {
+  if (claim.source === 'commit') {
+    const sha = cell((claim.commitSha ?? '').slice(0, 7))
+    return lang === 'zh' ? `提交 \`${sha}\`` : `commit \`${sha}\``
+  }
+  if (claim.source === 'title') return lang === 'zh' ? '标题' : 'title'
+  return lang === 'zh' ? '描述' : 'description'
+}
+
+function verdictWord(verdict: ClaimVerdict, lang: Language): string {
+  const en = { verified: 'verified', contradicted: 'contradicted', unverified: 'unverified' }
+  const zh = { verified: '已证实', contradicted: '相矛盾', unverified: '未证实' }
+  return lang === 'zh' ? zh[verdict] : en[verdict]
+}
+
+function claimEvidence(reason: ClaimReason, lang: Language): string {
+  switch (reason.code) {
+    case 'tests.verified':
+      return lang === 'zh'
+        ? `测试 job 已成功：${codeList(reason.jobs)}。${countPhrase(reason.passed, reason.failed, reason.skipped, lang)}`
+        : `Test jobs succeeded: ${codeList(reason.jobs)}. ${countPhrase(reason.passed, reason.failed, reason.skipped, lang)}`
+    case 'tests.contradicted':
+      return lang === 'zh'
+        ? `测试 job 失败或解析出的失败数大于 0：${codeList(reason.jobs)}。${countPhrase(reason.passed, reason.failed, null, lang)}`
+        : `A test job failed, or parsed failures are greater than zero: ${codeList(reason.jobs)}. ${countPhrase(reason.passed, reason.failed, null, lang)}`
+    case 'tests.unverified_none':
+      return lang === 'zh'
+        ? '这个 SHA 上没有像测试的 job，不能证实测试通过。'
+        : 'No test-like job on this SHA, so the claim cannot be verified.'
+    case 'tests.unverified_running':
+      return lang === 'zh'
+        ? `测试 job 还在跑：${codeList(reason.jobs)}。`
+        : `Test jobs are still running: ${codeList(reason.jobs)}.`
+    case 'tests.unverified_skipped':
+      return lang === 'zh'
+        ? '命中的测试 job 没有成功结束。'
+        : 'No matched test job completed successfully.'
+    case 'tests.unverified_zero':
+      return lang === 'zh'
+        ? `解析出的测试数量是 0：${codeList(reason.jobs)}。`
+        : `Parsed test counts are zero for ${codeList(reason.jobs)}.`
+    case 'tests.unverified_api':
+      return lang === 'zh'
+        ? '读取 check 或 workflow 失败，没有测试证据。'
+        : 'Checks or workflow runs could not be read, so there is no test evidence.'
+    case 'check.verified':
+      return lang === 'zh'
+        ? `${checkKind(reason.kind, lang)}检查已成功：${codeList(reason.jobs)}。`
+        : `${checkKind(reason.kind, lang)} checks succeeded: ${codeList(reason.jobs)}.`
+    case 'check.contradicted':
+      return lang === 'zh'
+        ? `${checkKind(reason.kind, lang)}检查失败：${codeList(reason.jobs)}。`
+        : `${checkKind(reason.kind, lang)} checks failed: ${codeList(reason.jobs)}.`
+    case 'check.unverified_none':
+      return lang === 'zh'
+        ? `这个 SHA 上没有成功的${checkKind(reason.kind, lang)}检查。`
+        : `No successful ${checkKind(reason.kind, lang)} check for this SHA.`
+    case 'check.unverified_running':
+      return lang === 'zh'
+        ? `${checkKind(reason.kind, lang)}检查还在跑：${codeList(reason.jobs)}。`
+        : `${checkKind(reason.kind, lang)} checks are still running: ${codeList(reason.jobs)}.`
+    case 'check.unverified_api':
+      return lang === 'zh'
+        ? `读取 check 或 workflow 失败，没有${checkKind(reason.kind, lang)}证据。`
+        : `Checks or workflow runs could not be read, so there is no ${checkKind(reason.kind, lang)} evidence.`
+    case 'files.verified':
+      return lang === 'zh'
+        ? `diff 里有测试文件改动：${codeList(reason.files)}。`
+        : `The diff changes test files: ${codeList(reason.files)}.`
+    case 'files.contradicted':
+      return lang === 'zh'
+        ? `diff 有 ${reason.changed} 个文件，其中没有新增或增加行数的测试文件。`
+        : `The diff has ${reason.changed} files and no added or expanded test file.`
+    case 'files.unverified':
+      return lang === 'zh'
+        ? '读不到 diff，不能判断是否新增了测试。'
+        : 'The diff could not be read, so added tests cannot be judged.'
+    case 'issue.verified': {
+      const title = reason.title ? ` “${cell(reason.title)}”` : ''
+      return lang === 'zh'
+        ? `issue #${reason.number}${title} 存在，并且这个 PR ${reason.linked ? '关联了它' : '提到了它'}。这不证明 diff 修好了它。`
+        : `Issue #${reason.number}${title} exists and this pull request ${reason.linked ? 'links it' : 'mentions it'}. This does not prove the diff fixes it.`
+    }
+    case 'issue.verified_any':
+      return lang === 'zh'
+        ? `这个 PR 关联了 issue ${reason.numbers.map((number) => `#${number}`).join('、')}。这不证明 diff 修好了它们。`
+        : `This pull request links ${reason.numbers.map((number) => `#${number}`).join(', ')}. This does not prove the diff fixes them.`
+    case 'issue.contradicted_missing':
+      return lang === 'zh'
+        ? `issue #${reason.number} 不存在。`
+        : `Issue #${reason.number} does not exist.`
+    case 'issue.unverified_none':
+      return lang === 'zh'
+        ? '没有关联 issue，不能证实“已修复”。'
+        : 'No linked issue, so a fix claim cannot be verified.'
+    case 'issue.unverified_unreadable':
+      return reason.number == null
+        ? (lang === 'zh' ? '关联 issue 的正文读不到。' : 'Linked issues could not be read.')
+        : (lang === 'zh'
+          ? `issue #${reason.number} 读不到，不能判断它是否存在。`
+          : `Issue #${reason.number} could not be read, so it is not clear that it exists.`)
+    default:
+      return ''
+  }
+}
+
+function countPhrase(passed: number | null, failed: number | null, skipped: number | null, lang: Language): string {
+  if (passed == null && failed == null) {
+    return lang === 'zh' ? '没有解析出测试数量。' : 'No test counts were parsed.'
+  }
+  const passedText = passed ?? 0
+  const failedText = failed ?? 0
+  const skippedText = skipped == null ? '' : (lang === 'zh' ? `，跳过 ${skipped}` : `, ${skipped} skipped`)
+  return lang === 'zh'
+    ? `解析数量：通过 ${passedText}，失败 ${failedText}${skippedText}。`
+    : `Parsed counts: ${passedText} passed, ${failedText} failed${skippedText}.`
+}
+
+function checkKind(kind: CheckClaimKind, lang: Language): string {
+  const en = { lint: 'lint', build: 'build', breaking: 'breaking-change' }
+  const zh = { lint: 'lint', build: '构建', breaking: '破坏性变更' }
+  return lang === 'zh' ? zh[kind] : en[kind]
 }
 
 function footer(report: Report, lang: Language): string {

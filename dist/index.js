@@ -34019,6 +34019,469 @@ function wrappy (fn, cb) {
 
 /***/ }),
 
+/***/ 8795:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.DEFAULT_TEST_PATHS = exports.DEFAULT_BREAKING_PATTERNS = exports.DEFAULT_BUILD_PATTERNS = exports.DEFAULT_LINT_PATTERNS = exports.DEFAULT_CLAIM_PATTERNS = void 0;
+exports.DEFAULT_CLAIM_PATTERNS = [
+    {
+        id: 'tests_pass',
+        evidence: 'tests',
+        patterns: [
+            '(?i)(?<![A-Za-z])all tests pass(?![A-Za-z])',
+            '(?i)(?<![A-Za-z])tests passing(?![A-Za-z])',
+            '(?i)(?<![A-Za-z])tests pass(?![A-Za-z])',
+            '测试全部通过',
+        ],
+    },
+    {
+        id: 'lint_clean',
+        evidence: 'lint',
+        patterns: [
+            '(?i)(?<![A-Za-z])lint clean(?![A-Za-z])',
+            '(?i)已通过\\s*lint',
+        ],
+    },
+    {
+        id: 'build_succeeds',
+        evidence: 'build',
+        patterns: [
+            '(?i)(?<![A-Za-z])build succeeds(?![A-Za-z])',
+        ],
+    },
+    {
+        id: 'no_breaking_changes',
+        evidence: 'breaking',
+        patterns: [
+            '(?i)(?<![A-Za-z])no breaking changes(?![A-Za-z])',
+            '(?i)(?<![A-Za-z])no breaking change(?![A-Za-z])',
+            '无破坏性变更',
+            '没有破坏性变更',
+        ],
+    },
+    {
+        id: 'added_tests',
+        evidence: 'test_files',
+        patterns: [
+            '(?i)(?<![A-Za-z])added tests(?![A-Za-z])',
+            '新增了测试',
+            '添加了测试',
+            '新增测试',
+        ],
+    },
+    {
+        id: 'fixed_issue',
+        evidence: 'linked_issue',
+        patterns: [
+            '(?i)(?<![A-Za-z])fix(?:ed|es)?\\s+#(\\d+)',
+            '已修复\\s*#(\\d+)',
+            '已修复(?!\\s*#\\d)',
+        ],
+    },
+];
+exports.DEFAULT_LINT_PATTERNS = [
+    '(?i)\\blint\\b',
+    '(?i)\\beslint\\b',
+    '(?i)\\bprettier\\b',
+    '(?i)\\bformat\\b',
+    '(?i)\\bruff\\b',
+    '(?i)\\bclippy\\b',
+];
+exports.DEFAULT_BUILD_PATTERNS = [
+    '(?i)\\bbuild\\b',
+    '(?i)\\bcompile\\b',
+    '(?i)\\bpackage\\b',
+];
+exports.DEFAULT_BREAKING_PATTERNS = [
+    '(?i)breaking',
+    '(?i)api-compat',
+    '(?i)\\bsemver\\b',
+];
+exports.DEFAULT_TEST_PATHS = [
+    '**/*.{test,spec}.{js,cjs,mjs,ts,tsx,jsx}',
+    '**/__tests__/**',
+    '**/tests/**',
+    '**/*_test.go',
+    '**/test_*.py',
+    '**/*_test.py',
+];
+
+
+/***/ }),
+
+/***/ 4481:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.parseClaims = parseClaims;
+const config_1 = __nccwpck_require__(2973);
+const text_1 = __nccwpck_require__(8992);
+const NEGATION = /(?:^|[^A-Za-z])(?:not|no|never|don'?t|doesn'?t|without)\b/i;
+const ZH_NEGATION = /没有|未|并非|不是|并不/;
+function parseClaims(input) {
+    const found = [];
+    const take = (text, source, document, commitSha) => {
+        found.push(...matchDocument(text, input.patterns, source, document, commitSha));
+    };
+    take(input.title, 'title', 0);
+    take(input.body, 'description', 1);
+    if (input.scanCommits) {
+        for (const [index, commit] of (input.commits ?? []).entries()) {
+            take(commit.message, 'commit', index + 2, commit.sha);
+        }
+    }
+    return dedupe(found).map((claim) => ({
+        id: claim.id,
+        evidence: claim.evidence,
+        text: claim.text,
+        source: claim.source,
+        ...(claim.commitSha ? { commitSha: claim.commitSha } : {}),
+        ...(claim.issueNumber != null ? { issueNumber: claim.issueNumber } : {}),
+        order: claim.order,
+    }));
+}
+function matchDocument(text, patterns, source, document, commitSha) {
+    const visible = stripFenced((0, text_1.stripHtmlComments)(text));
+    const hits = [];
+    for (const pattern of patterns) {
+        for (const sourcePattern of pattern.patterns) {
+            for (const match of matchAll(sourcePattern, visible)) {
+                const start = match.index ?? 0;
+                const raw = match[0];
+                if (!raw || isNegated(visible, start))
+                    continue;
+                const issueNumber = pattern.evidence === 'linked_issue' ? captureIssue(match[1]) : undefined;
+                hits.push({
+                    id: pattern.id,
+                    evidence: pattern.evidence,
+                    text: raw.replace(/\s+/g, ' ').trim(),
+                    source,
+                    ...(commitSha ? { commitSha } : {}),
+                    ...(issueNumber != null ? { issueNumber } : {}),
+                    order: document * 1_000_000 + start,
+                    start,
+                    end: start + raw.length,
+                });
+            }
+        }
+    }
+    hits.sort((a, b) => a.start - b.start || b.end - a.end || a.id.localeCompare(b.id));
+    const kept = [];
+    let lastEnd = -1;
+    for (const hit of hits) {
+        if (hit.start < lastEnd)
+            continue;
+        kept.push(hit);
+        lastEnd = hit.end;
+    }
+    return kept;
+}
+function matchAll(pattern, text) {
+    const compiled = (0, config_1.compilePattern)(pattern);
+    const flags = compiled.flags.includes('g') ? compiled.flags : `${compiled.flags}g`;
+    return [...text.matchAll(new RegExp(compiled.source, flags))];
+}
+function captureIssue(value) {
+    if (!value || !/^\d+$/.test(value))
+        return undefined;
+    const number = Number(value);
+    return number > 0 ? number : undefined;
+}
+function isNegated(text, start) {
+    const raw = text.slice(Math.max(0, start - 32), start);
+    const cut = Math.max(raw.lastIndexOf('\n'), raw.lastIndexOf('.'), raw.lastIndexOf('!'), raw.lastIndexOf('?'), raw.lastIndexOf('。'), raw.lastIndexOf('！'), raw.lastIndexOf('？'));
+    const window = cut >= 0 ? raw.slice(cut + 1) : raw;
+    return NEGATION.test(window) || ZH_NEGATION.test(window);
+}
+function dedupe(claims) {
+    const seen = new Set();
+    const out = [];
+    const sorted = [...claims].sort((a, b) => a.order - b.order);
+    for (const claim of sorted) {
+        const identity = claim.issueNumber != null ? `#${claim.issueNumber}` : claim.text.toLowerCase();
+        const key = claim.source === 'commit'
+            ? `${claim.id}|${identity}|commit|${claim.commitSha ?? ''}`
+            : `${claim.id}|${identity}|description`;
+        if (seen.has(key))
+            continue;
+        seen.add(key);
+        out.push(claim);
+    }
+    return out;
+}
+function stripFenced(text) {
+    return text.replace(/```[\s\S]*?```/g, ' ');
+}
+
+
+/***/ }),
+
+/***/ 60:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.skippedClaims = skippedClaims;
+exports.verifyClaims = verifyClaims;
+exports.claimStatus = claimStatus;
+exports.confirmedIssue = confirmedIssue;
+const config_1 = __nccwpck_require__(2973);
+const sensitive_1 = __nccwpck_require__(1712);
+const CLAIM_LIMIT = 40;
+const FAILED = new Set(['failure', 'timed_out', 'cancelled', 'startup_failure']);
+const PASSED = new Set(['success', 'neutral']);
+function skippedClaims() {
+    return { enabled: false, status: 'skipped', scannedCommits: false, results: [], omitted: 0 };
+}
+function verifyClaims(input) {
+    const selected = input.claims.slice(0, CLAIM_LIMIT);
+    const results = selected.map((claim) => judge(claim, input));
+    return {
+        enabled: true,
+        status: claimStatus(results, input.config.contradicted),
+        scannedCommits: input.scanCommits,
+        results,
+        omitted: Math.max(0, input.claims.length - selected.length),
+    };
+}
+function claimStatus(results, contradicted) {
+    if (!results.some((result) => result.verdict === 'contradicted'))
+        return 'pass';
+    return contradicted === 'error' ? 'error' : 'warn';
+}
+function confirmedIssue(issue) {
+    if (issue.unreadable)
+        return false;
+    if (issue.source === 'api' || issue.source === 'both')
+        return true;
+    return issue.title.length > 0 || issue.body.length > 0;
+}
+function judge(claim, input) {
+    const reason = reasonFor(claim, input);
+    return {
+        id: claim.id,
+        evidence: claim.evidence,
+        text: claim.text,
+        source: claim.source,
+        ...(claim.commitSha ? { commitSha: claim.commitSha } : {}),
+        ...(claim.issueNumber != null ? { issueNumber: claim.issueNumber } : {}),
+        verdict: verdictFor(reason),
+        reason,
+    };
+}
+function reasonFor(claim, input) {
+    switch (claim.evidence) {
+        case 'tests':
+            return judgeTests(input.testJobs, input.ciError);
+        case 'lint':
+            return judgeNamed('lint', input.config.lintNamePatterns, input);
+        case 'build':
+            return judgeNamed('build', input.config.buildNamePatterns, input);
+        case 'breaking':
+            return judgeNamed('breaking', input.config.breakingNamePatterns, input);
+        case 'test_files':
+            return judgeFiles(input.files, input.config.testPaths);
+        case 'linked_issue':
+            return judgeIssue(claim, input.issues, input.resolvedIssues);
+        default:
+            return { code: 'tests.unverified_none' };
+    }
+}
+function verdictFor(reason) {
+    switch (reason.code) {
+        case 'tests.verified':
+        case 'check.verified':
+        case 'files.verified':
+        case 'issue.verified':
+        case 'issue.verified_any':
+            return 'verified';
+        case 'tests.contradicted':
+        case 'check.contradicted':
+        case 'files.contradicted':
+        case 'issue.contradicted_missing':
+            return 'contradicted';
+        default:
+            return 'unverified';
+    }
+}
+function judgeTests(jobs, ciError) {
+    if (ciError && jobs.length === 0)
+        return { code: 'tests.unverified_api' };
+    if (jobs.length === 0)
+        return { code: 'tests.unverified_none' };
+    const counted = collapseEventDuplicates(jobs);
+    const counts = sumCounts(counted);
+    const failed = counted.filter((job) => FAILED.has(job.conclusion ?? '') || (job.counts?.failed ?? 0) > 0);
+    if (failed.length > 0) {
+        return {
+            code: 'tests.contradicted',
+            jobs: names(failed.map(displayEvidence)),
+            passed: counts?.passed ?? null,
+            failed: counts?.failed ?? null,
+        };
+    }
+    const running = counted.filter((job) => job.status !== 'completed');
+    if (running.length > 0)
+        return { code: 'tests.unverified_running', jobs: names(running.map(displayEvidence)) };
+    const completed = counted.filter((job) => job.status === 'completed');
+    const good = completed.filter((job) => PASSED.has(job.conclusion ?? ''));
+    if (good.length === 0)
+        return { code: 'tests.unverified_skipped' };
+    const zeroOnly = good.every((job) => job.note === 'zero_tests' || (job.counts != null && job.counts.total === 0));
+    if (zeroOnly && good.some((job) => job.counts != null || job.note === 'zero_tests')) {
+        return { code: 'tests.unverified_zero', jobs: names(good.map(displayEvidence)) };
+    }
+    return {
+        code: 'tests.verified',
+        jobs: names(good.map(displayEvidence)),
+        passed: counts?.passed ?? null,
+        failed: counts?.failed ?? null,
+        skipped: counts?.skipped ?? null,
+    };
+}
+function judgeNamed(kind, patterns, input) {
+    if (input.ciError && input.jobs.length === 0 && input.checks.length === 0)
+        return { code: 'check.unverified_api', kind };
+    const matched = matchNamed(input.jobs, input.checks, patterns);
+    if (matched.length === 0)
+        return { code: 'check.unverified_none', kind };
+    const failed = matched.filter((item) => FAILED.has(item.conclusion ?? ''));
+    if (failed.length > 0)
+        return { code: 'check.contradicted', kind, jobs: names(failed.map((item) => item.name)) };
+    const running = matched.filter((item) => item.status !== 'completed');
+    if (running.length > 0)
+        return { code: 'check.unverified_running', kind, jobs: names(running.map((item) => item.name)) };
+    const good = matched.filter((item) => PASSED.has(item.conclusion ?? ''));
+    if (good.length === 0)
+        return { code: 'check.unverified_none', kind };
+    return { code: 'check.verified', kind, jobs: names(good.map((item) => item.name)) };
+}
+function judgeFiles(files, patterns) {
+    if (files == null)
+        return { code: 'files.unverified' };
+    const added = files.filter((file) => isAddedTest(file, patterns)).map((file) => file.filename);
+    if (added.length > 0)
+        return { code: 'files.verified', files: added.slice(0, 8) };
+    return { code: 'files.contradicted', changed: files.length };
+}
+function judgeIssue(claim, issues, resolved) {
+    if (claim.issueNumber == null) {
+        const readable = issues.filter(confirmedIssue);
+        if (readable.length === 0) {
+            return issues.length > 0 ? { code: 'issue.unverified_unreadable' } : { code: 'issue.unverified_none' };
+        }
+        return { code: 'issue.verified_any', numbers: readable.map((issue) => issue.number).slice(0, 8) };
+    }
+    const known = resolved.get(claim.issueNumber);
+    if (!known || known.state === 'error')
+        return { code: 'issue.unverified_unreadable', number: claim.issueNumber };
+    if (known.state === 'missing')
+        return { code: 'issue.contradicted_missing', number: claim.issueNumber };
+    return { code: 'issue.verified', number: claim.issueNumber, title: known.title, linked: known.linked };
+}
+function isAddedTest(file, patterns) {
+    if (file.status === 'removed')
+        return false;
+    const names = [file.filename, file.previousFilename].filter((name) => Boolean(name));
+    if (!names.some((name) => (0, sensitive_1.matchIgnore)(name, patterns)))
+        return false;
+    return file.additions > 0 || file.status === 'added' || file.status === 'renamed' || file.status === 'copied';
+}
+function matchNamed(jobs, checks, patterns) {
+    const include = patterns.map(config_1.compilePattern);
+    const matches = (name) => include.some((pattern) => (0, config_1.testPattern)(pattern, name));
+    const matchedJobs = jobs.filter((job) => matches(job.name) || matches(`${job.workflowName} / ${job.name}`));
+    const jobNames = new Set(jobs.map((job) => job.name.toLowerCase()));
+    const matchedChecks = checks.filter((check) => !jobNames.has(check.name.toLowerCase()) && matches(check.name));
+    return [
+        ...matchedJobs.map((job) => ({
+            name: job.workflowName ? `${job.workflowName} / ${job.name}` : job.name,
+            status: job.status,
+            conclusion: job.conclusion,
+        })),
+        ...matchedChecks.map((check) => ({ name: check.name, status: check.status, conclusion: check.conclusion })),
+    ];
+}
+function collapseEventDuplicates(jobs) {
+    const buckets = new Map();
+    const rest = [];
+    for (const job of jobs) {
+        if (job.event !== 'push' && job.event !== 'pull_request') {
+            rest.push(job);
+            continue;
+        }
+        const key = `${job.workflowName ?? ''}\0${job.name}`.toLowerCase();
+        const bucket = buckets.get(key);
+        if (bucket)
+            bucket.push(job);
+        else
+            buckets.set(key, [job]);
+    }
+    const chosen = [];
+    for (const bucket of buckets.values()) {
+        const events = new Set(bucket.map((job) => job.event));
+        if (bucket.length > 1 && events.has('push') && events.has('pull_request'))
+            chosen.push(representDuplicate(bucket));
+        else
+            chosen.push(...bucket);
+    }
+    return [...rest, ...chosen];
+}
+function representDuplicate(jobs) {
+    const preferred = [...jobs].sort(byPreferredRun)[0];
+    if (!preferred)
+        return jobs[0];
+    const failing = jobs.find((job) => FAILED.has(job.conclusion ?? '') || (job.counts?.failed ?? 0) > 0);
+    if (!failing)
+        return preferred;
+    if (FAILED.has(preferred.conclusion ?? '') || (preferred.counts?.failed ?? 0) > 0)
+        return preferred;
+    return { ...preferred, conclusion: FAILED.has(failing.conclusion ?? '') ? failing.conclusion : 'failure' };
+}
+function byPreferredRun(a, b) {
+    const completed = Number(b.status === 'completed') - Number(a.status === 'completed');
+    if (completed !== 0)
+        return completed;
+    const time = completedMillis(b) - completedMillis(a);
+    if (time !== 0)
+        return time;
+    const pullRequest = Number(b.event === 'pull_request') - Number(a.event === 'pull_request');
+    if (pullRequest !== 0)
+        return pullRequest;
+    return (b.runId ?? 0) - (a.runId ?? 0);
+}
+function completedMillis(job) {
+    if (job.status !== 'completed' || !job.completedAt)
+        return 0;
+    const parsed = Date.parse(job.completedAt);
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+function sumCounts(jobs) {
+    const counted = jobs.filter((job) => job.counts);
+    if (counted.length === 0)
+        return null;
+    return counted.reduce((total, job) => ({
+        passed: total.passed + (job.counts?.passed ?? 0),
+        failed: total.failed + (job.counts?.failed ?? 0),
+        skipped: total.skipped + (job.counts?.skipped ?? 0),
+    }), { passed: 0, failed: 0, skipped: 0 });
+}
+function displayEvidence(job) {
+    return job.workflowName ? `${job.workflowName} / ${job.name}` : job.name;
+}
+function names(values) {
+    return [...new Set(values)].sort((a, b) => a.localeCompare(b));
+}
+
+
+/***/ }),
+
 /***/ 2973:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -34039,6 +34502,7 @@ exports.testPattern = testPattern;
 exports.sensitiveReasonLabel = sensitiveReasonLabel;
 const node_fs_1 = __nccwpck_require__(3024);
 const js_yaml_1 = __importDefault(__nccwpck_require__(4281));
+const defaults_1 = __nccwpck_require__(8795);
 const errors_1 = __nccwpck_require__(3916);
 const DEFAULT_KEYWORDS = [
     'close',
@@ -34097,7 +34561,7 @@ function defaultHeadings() {
 function defaultConfig() {
     return {
         language: 'en',
-        checks: { scope: true, testEvidence: true, reviewPacket: true },
+        checks: { scope: true, testEvidence: true, reviewPacket: true, claims: true },
         scope: {
             largeDiffLines: 400,
             largeDiffFiles: 20,
@@ -34126,6 +34590,15 @@ function defaultConfig() {
             minBodyChars: 8,
             incomplete: 'warn',
         },
+        claims: {
+            scanCommits: false,
+            contradicted: 'warn',
+            patterns: defaults_1.DEFAULT_CLAIM_PATTERNS.map((pattern) => ({ ...pattern, patterns: [...pattern.patterns] })),
+            lintNamePatterns: [...defaults_1.DEFAULT_LINT_PATTERNS],
+            buildNamePatterns: [...defaults_1.DEFAULT_BUILD_PATTERNS],
+            breakingNamePatterns: [...defaults_1.DEFAULT_BREAKING_PATTERNS],
+            testPaths: [...defaults_1.DEFAULT_TEST_PATHS],
+        },
     };
 }
 function loadConfig(text, fileLabel, warn = () => undefined) {
@@ -34145,14 +34618,14 @@ function loadConfig(text, fileLabel, warn = () => undefined) {
         throw new errors_1.ActionFailure('misconfigured', `${fileLabel} must be a YAML mapping.`);
     }
     const config = defaultConfig();
-    warnUnknown(raw, ['language', 'checks', 'scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket'], fileLabel, warn);
+    warnUnknown(raw, ['language', 'checks', 'scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims'], fileLabel, warn);
     if ('language' in raw)
         config.language = expectLanguage(raw.language, 'language');
     const checks = pick(raw, 'checks');
     if (checks !== undefined) {
         if (!isRecord(checks))
             throw new errors_1.ActionFailure('misconfigured', 'checks must be a mapping.');
-        warnUnknown(checks, ['scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket'], 'checks', warn);
+        warnUnknown(checks, ['scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims'], 'checks', warn);
         if ('scope' in checks)
             config.checks.scope = expectBoolean(checks.scope, 'checks.scope');
         const testFlag = firstDefined(checks, 'test-evidence', 'testEvidence');
@@ -34161,6 +34634,8 @@ function loadConfig(text, fileLabel, warn = () => undefined) {
         const packetFlag = firstDefined(checks, 'review-packet', 'reviewPacket');
         if (packetFlag !== undefined)
             config.checks.reviewPacket = expectBoolean(packetFlag, 'checks.review-packet');
+        if ('claims' in checks)
+            config.checks.claims = expectBoolean(checks.claims, 'checks.claims');
     }
     const scope = pick(raw, 'scope');
     if (scope !== undefined)
@@ -34171,6 +34646,8 @@ function loadConfig(text, fileLabel, warn = () => undefined) {
     const packet = firstDefined(raw, 'review-packet', 'reviewPacket');
     if (packet !== undefined)
         applyPacket(config, packet, warn);
+    if ('claims' in raw)
+        applyClaims(config, raw.claims, warn);
     validatePatterns(config);
     return config;
 }
@@ -34379,9 +34856,85 @@ function applyPacket(config, value, warn) {
             config.reviewPacket.headings.selfVerification = expectHeadingList('self-verification', self);
     }
 }
+function applyClaims(config, value, warn) {
+    if (!isRecord(value))
+        throw new errors_1.ActionFailure('misconfigured', 'claims must be a mapping.');
+    const known = [
+        'scan-commits',
+        'scanCommits',
+        'contradicted',
+        'patterns',
+        'lint-name-patterns',
+        'lintNamePatterns',
+        'build-name-patterns',
+        'buildNamePatterns',
+        'breaking-name-patterns',
+        'breakingNamePatterns',
+        'test-paths',
+        'testPaths',
+    ];
+    warnUnknown(value, known, 'claims', warn);
+    const scan = firstDefined(value, 'scan-commits', 'scanCommits');
+    if (scan !== undefined)
+        config.claims.scanCommits = expectBoolean(scan, 'claims.scan-commits');
+    if ('contradicted' in value)
+        config.claims.contradicted = expectSeverity(value.contradicted, 'claims.contradicted');
+    if ('patterns' in value)
+        config.claims.patterns = expectClaimPatterns(value.patterns);
+    const lint = firstDefined(value, 'lint-name-patterns', 'lintNamePatterns');
+    if (lint !== undefined)
+        config.claims.lintNamePatterns = expectPatternList('claims.lint-name-patterns', lint);
+    const build = firstDefined(value, 'build-name-patterns', 'buildNamePatterns');
+    if (build !== undefined)
+        config.claims.buildNamePatterns = expectPatternList('claims.build-name-patterns', build);
+    const breaking = firstDefined(value, 'breaking-name-patterns', 'breakingNamePatterns');
+    if (breaking !== undefined)
+        config.claims.breakingNamePatterns = expectPatternList('claims.breaking-name-patterns', breaking);
+    const paths = firstDefined(value, 'test-paths', 'testPaths');
+    if (paths !== undefined)
+        config.claims.testPaths = expectPatternList('claims.test-paths', paths);
+}
+const CLAIM_EVIDENCE = ['tests', 'lint', 'build', 'breaking', 'test_files', 'linked_issue'];
+function expectClaimPatterns(value) {
+    if (!Array.isArray(value))
+        throw new errors_1.ActionFailure('misconfigured', 'claims.patterns must be a list.');
+    const ids = new Set();
+    return value.map((item, index) => {
+        if (!isRecord(item))
+            throw new errors_1.ActionFailure('misconfigured', `claims.patterns[${index}] must be a mapping.`);
+        const id = typeof item.id === 'string' ? item.id.trim() : '';
+        if (!id)
+            throw new errors_1.ActionFailure('misconfigured', `claims.patterns[${index}].id must be a non-empty string.`);
+        if (ids.has(id))
+            throw new errors_1.ActionFailure('misconfigured', `claims.patterns id "${id}" is duplicated.`);
+        ids.add(id);
+        const evidence = item.evidence;
+        if (typeof evidence !== 'string' || !CLAIM_EVIDENCE.includes(evidence)) {
+            throw new errors_1.ActionFailure('misconfigured', `claims.patterns[${index}].evidence must be tests, lint, build, breaking, test_files, or linked_issue.`);
+        }
+        const patterns = expectPatternList(`claims.patterns[${index}].patterns`, item.patterns);
+        return { id, evidence: evidence, patterns };
+    });
+}
+function expectPatternList(label, value) {
+    const list = expectStringArray(label, value).map((item) => item.trim()).filter((item) => item.length > 0);
+    if (list.length === 0)
+        throw new errors_1.ActionFailure('misconfigured', `${label} must list at least one pattern.`);
+    return list;
+}
 function validatePatterns(config) {
-    for (const pattern of [...config.testEvidence.jobNamePatterns, ...config.testEvidence.excludeNamePatterns]) {
+    for (const pattern of [
+        ...config.testEvidence.jobNamePatterns,
+        ...config.testEvidence.excludeNamePatterns,
+        ...config.claims.lintNamePatterns,
+        ...config.claims.buildNamePatterns,
+        ...config.claims.breakingNamePatterns,
+    ]) {
         compilePattern(pattern);
+    }
+    for (const claim of config.claims.patterns) {
+        for (const pattern of claim.patterns)
+            compilePattern(pattern);
     }
 }
 function expectHeadingList(name, value) {
@@ -34872,6 +35425,9 @@ function toJobReport(item, parseLogs) {
         status: item.status,
         conclusion: item.conclusion,
         ...(item.url ? { url: item.url } : {}),
+        ...(item.event ? { event: item.event } : {}),
+        ...(item.completedAt ? { completedAt: item.completedAt } : {}),
+        ...(item.runId != null ? { runId: item.runId } : {}),
     };
     if (item.status !== 'completed') {
         return { ...base, counts: null, note: 'in_progress' };
@@ -35085,6 +35641,8 @@ function createGitHubClient(options) {
                 if (!runId)
                     continue;
                 const workflowName = (0, text_1.asString)(record?.name) ?? '';
+                const event = (0, text_1.asString)(record?.event) ?? '';
+                const runUpdatedAt = (0, text_1.asString)(record?.updated_at);
                 const rows = await paginate(transport, 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs', {
                     owner,
                     repo,
@@ -35094,7 +35652,7 @@ function createGitHubClient(options) {
                     return Array.isArray(body?.jobs) ? body.jobs : [];
                 }, 100);
                 for (const row of rows) {
-                    const job = toWorkflowJob(row, workflowName, runId);
+                    const job = toWorkflowJob(row, workflowName, runId, event, runUpdatedAt);
                     if (job)
                         jobs.push(job);
                     if (jobs.length >= 200)
@@ -35114,6 +35672,21 @@ function createGitHubClient(options) {
                 repo,
                 jobId,
                 maxChars,
+            });
+        },
+        async listPullCommits(number) {
+            const rows = await paginate(transport, 'GET /repos/{owner}/{repo}/pulls/{pull_number}/commits', {
+                owner,
+                repo,
+                pull_number: number,
+            }, (data) => (Array.isArray(data) ? data : []), 100);
+            return rows.flatMap((row) => {
+                const record = (0, text_1.asRecord)(row);
+                const commit = (0, text_1.asRecord)(record?.commit);
+                const sha = (0, text_1.asString)(record?.sha);
+                if (!sha)
+                    return [];
+                return [{ sha, message: (0, text_1.asString)(commit?.message) ?? '' }];
             });
         },
         async listComments(number) {
@@ -35214,19 +35787,23 @@ function toCheckRun(value) {
         ...(summary ? { summary } : {}),
     };
 }
-function toWorkflowJob(value, workflowName, runId) {
+function toWorkflowJob(value, workflowName, runId, event, runUpdatedAt) {
     const record = (0, text_1.asRecord)(value);
     const id = (0, text_1.asNumber)(record?.id);
     if (!id)
         return undefined;
+    const status = (0, text_1.asString)(record?.status) ?? 'completed';
+    const completedAt = (0, text_1.asString)(record?.completed_at) ?? (status === 'completed' ? runUpdatedAt : undefined);
     return {
         id,
         name: (0, text_1.asString)(record?.name) ?? '',
         workflowName,
-        status: (0, text_1.asString)(record?.status) ?? 'completed',
+        status,
         conclusion: typeof record?.conclusion === 'string' ? record.conclusion : null,
         ...((0, text_1.asString)(record?.html_url) ? { htmlUrl: (0, text_1.asString)(record?.html_url) } : {}),
         runId,
+        ...(event ? { event } : {}),
+        ...(completedAt ? { completedAt } : {}),
     };
 }
 function toGraphqlIssue(value) {
@@ -35432,6 +36009,7 @@ async function main() {
             io: {
                 info: (message) => core.info(message),
                 warning: (message) => core.warning(message),
+                error: (message) => core.error(message),
                 setOutput: (name, value) => core.setOutput(name, value),
                 writeSummary: async (markdown) => {
                     core.summary.emptyBuffer();
@@ -35608,7 +36186,7 @@ const text_1 = __nccwpck_require__(8992);
 exports.MARKER = '<!-- pr-evidence-check -->';
 const FILE_LIMIT = 40;
 function renderComment(report, prRepo) {
-    const statusLine = `<!-- pr-evidence-check scope=${report.scope.status} test-evidence=${report.evidence.status} review-packet=${report.packet.status} -->`;
+    const statusLine = `<!-- pr-evidence-check scope=${report.scope.status} test-evidence=${report.evidence.status} review-packet=${report.packet.status} claims=${report.claims.status} -->`;
     const body = renderBody(report, prRepo);
     return `${exports.MARKER}\n${statusLine}\n${body}`;
 }
@@ -35628,6 +36206,8 @@ function renderBody(report, prRepo) {
         renderEvidence(report.evidence, lang),
         '',
         renderPacket(report.packet, lang),
+        '',
+        renderClaims(report.claims, lang),
         '',
         footer(report, lang),
     ];
@@ -35656,6 +36236,7 @@ function statusTable(report, lang) {
         [lang === 'zh' ? '范围与关联 issue' : 'Scope vs linked issue', statusWord(report.scope.status, lang)],
         [lang === 'zh' ? '测试证据（已有 CI）' : 'Test evidence (existing CI)', statusWord(report.evidence.status, lang)],
         [lang === 'zh' ? '审查材料包' : 'Review packet', statusWord(report.packet.status, lang)],
+        [lang === 'zh' ? '声明核验' : 'Claim verification', statusWord(report.claims.status, lang)],
     ];
     return markdownTable(headers, rows.map((row) => row.map((value) => `**${value}**`)));
 }
@@ -35750,6 +36331,164 @@ function renderPacket(packet, lang) {
     ]);
     lines.push(markdownTable(headers, rows));
     return lines.join('\n');
+}
+function renderClaims(claims, lang) {
+    const title = lang === 'zh' ? '### 声明核验' : '### Claim verification';
+    if (!claims.enabled) {
+        return `${title} · ${statusWord('skipped', lang)}\n\n${lang === 'zh' ? '已在配置中关闭。' : 'Disabled in config.'}`;
+    }
+    const lines = [`${title} · ${statusWord(claims.status, lang)}`, ''];
+    lines.push(lang === 'zh'
+        ? '用确定的短语规则核对 PR 标题、描述'
+            + (claims.scannedCommits ? '和提交说明' : '')
+            + '。证据只来自这个 head SHA 上已经收集的 CI job、解析出的测试数量、diff 和关联 issue。不调用 LLM，也不重新跑测试。'
+        : 'Matches configured phrases in the pull request title and description'
+            + (claims.scannedCommits ? ' and in commit messages' : '')
+            + '. Evidence is the CI jobs, parsed test counts, diff, and linked issues already collected for this head SHA. No LLM, and tests were not re-run.');
+    if (claims.results.length === 0) {
+        lines.push('', lang === 'zh'
+            ? '标题和描述里没有命中已配置的声明。'
+            : 'No configured claim was found in the title or description.');
+        return lines.join('\n');
+    }
+    if (claims.omitted > 0) {
+        lines.push('', lang === 'zh'
+            ? `只列出前 ${claims.results.length} 条，另有 ${claims.omitted} 条未列出。`
+            : `Showing the first ${claims.results.length} claims. ${claims.omitted} more were omitted.`);
+    }
+    lines.push('');
+    const headers = lang === 'zh' ? ['声明', '位置', '结果', '证据'] : ['Claim', 'Where', 'Result', 'Evidence'];
+    const rows = claims.results.map((claim) => [
+        `\`${(0, text_1.cell)(claim.text)}\``,
+        claimWhere(claim, lang),
+        verdictWord(claim.verdict, lang),
+        claimEvidence(claim.reason, lang),
+    ]);
+    lines.push(markdownTable(headers, rows));
+    lines.push('', lang === 'zh'
+        ? '相矛盾的声明默认是警告。除非 workflow 把 `fail-on` 设成 `warning` 或 `error`，否则不会因此让 job 失败。'
+        : 'Contradicted claims are warnings by default. They do not fail the job unless `fail-on` is `warning` or `error`.');
+    return lines.join('\n');
+}
+function claimWhere(claim, lang) {
+    if (claim.source === 'commit') {
+        const sha = (0, text_1.cell)((claim.commitSha ?? '').slice(0, 7));
+        return lang === 'zh' ? `提交 \`${sha}\`` : `commit \`${sha}\``;
+    }
+    if (claim.source === 'title')
+        return lang === 'zh' ? '标题' : 'title';
+    return lang === 'zh' ? '描述' : 'description';
+}
+function verdictWord(verdict, lang) {
+    const en = { verified: 'verified', contradicted: 'contradicted', unverified: 'unverified' };
+    const zh = { verified: '已证实', contradicted: '相矛盾', unverified: '未证实' };
+    return lang === 'zh' ? zh[verdict] : en[verdict];
+}
+function claimEvidence(reason, lang) {
+    switch (reason.code) {
+        case 'tests.verified':
+            return lang === 'zh'
+                ? `测试 job 已成功：${codeList(reason.jobs)}。${countPhrase(reason.passed, reason.failed, reason.skipped, lang)}`
+                : `Test jobs succeeded: ${codeList(reason.jobs)}. ${countPhrase(reason.passed, reason.failed, reason.skipped, lang)}`;
+        case 'tests.contradicted':
+            return lang === 'zh'
+                ? `测试 job 失败或解析出的失败数大于 0：${codeList(reason.jobs)}。${countPhrase(reason.passed, reason.failed, null, lang)}`
+                : `A test job failed, or parsed failures are greater than zero: ${codeList(reason.jobs)}. ${countPhrase(reason.passed, reason.failed, null, lang)}`;
+        case 'tests.unverified_none':
+            return lang === 'zh'
+                ? '这个 SHA 上没有像测试的 job，不能证实测试通过。'
+                : 'No test-like job on this SHA, so the claim cannot be verified.';
+        case 'tests.unverified_running':
+            return lang === 'zh'
+                ? `测试 job 还在跑：${codeList(reason.jobs)}。`
+                : `Test jobs are still running: ${codeList(reason.jobs)}.`;
+        case 'tests.unverified_skipped':
+            return lang === 'zh'
+                ? '命中的测试 job 没有成功结束。'
+                : 'No matched test job completed successfully.';
+        case 'tests.unverified_zero':
+            return lang === 'zh'
+                ? `解析出的测试数量是 0：${codeList(reason.jobs)}。`
+                : `Parsed test counts are zero for ${codeList(reason.jobs)}.`;
+        case 'tests.unverified_api':
+            return lang === 'zh'
+                ? '读取 check 或 workflow 失败，没有测试证据。'
+                : 'Checks or workflow runs could not be read, so there is no test evidence.';
+        case 'check.verified':
+            return lang === 'zh'
+                ? `${checkKind(reason.kind, lang)}检查已成功：${codeList(reason.jobs)}。`
+                : `${checkKind(reason.kind, lang)} checks succeeded: ${codeList(reason.jobs)}.`;
+        case 'check.contradicted':
+            return lang === 'zh'
+                ? `${checkKind(reason.kind, lang)}检查失败：${codeList(reason.jobs)}。`
+                : `${checkKind(reason.kind, lang)} checks failed: ${codeList(reason.jobs)}.`;
+        case 'check.unverified_none':
+            return lang === 'zh'
+                ? `这个 SHA 上没有成功的${checkKind(reason.kind, lang)}检查。`
+                : `No successful ${checkKind(reason.kind, lang)} check for this SHA.`;
+        case 'check.unverified_running':
+            return lang === 'zh'
+                ? `${checkKind(reason.kind, lang)}检查还在跑：${codeList(reason.jobs)}。`
+                : `${checkKind(reason.kind, lang)} checks are still running: ${codeList(reason.jobs)}.`;
+        case 'check.unverified_api':
+            return lang === 'zh'
+                ? `读取 check 或 workflow 失败，没有${checkKind(reason.kind, lang)}证据。`
+                : `Checks or workflow runs could not be read, so there is no ${checkKind(reason.kind, lang)} evidence.`;
+        case 'files.verified':
+            return lang === 'zh'
+                ? `diff 里有测试文件改动：${codeList(reason.files)}。`
+                : `The diff changes test files: ${codeList(reason.files)}.`;
+        case 'files.contradicted':
+            return lang === 'zh'
+                ? `diff 有 ${reason.changed} 个文件，其中没有新增或增加行数的测试文件。`
+                : `The diff has ${reason.changed} files and no added or expanded test file.`;
+        case 'files.unverified':
+            return lang === 'zh'
+                ? '读不到 diff，不能判断是否新增了测试。'
+                : 'The diff could not be read, so added tests cannot be judged.';
+        case 'issue.verified': {
+            const title = reason.title ? ` “${(0, text_1.cell)(reason.title)}”` : '';
+            return lang === 'zh'
+                ? `issue #${reason.number}${title} 存在，并且这个 PR ${reason.linked ? '关联了它' : '提到了它'}。这不证明 diff 修好了它。`
+                : `Issue #${reason.number}${title} exists and this pull request ${reason.linked ? 'links it' : 'mentions it'}. This does not prove the diff fixes it.`;
+        }
+        case 'issue.verified_any':
+            return lang === 'zh'
+                ? `这个 PR 关联了 issue ${reason.numbers.map((number) => `#${number}`).join('、')}。这不证明 diff 修好了它们。`
+                : `This pull request links ${reason.numbers.map((number) => `#${number}`).join(', ')}. This does not prove the diff fixes them.`;
+        case 'issue.contradicted_missing':
+            return lang === 'zh'
+                ? `issue #${reason.number} 不存在。`
+                : `Issue #${reason.number} does not exist.`;
+        case 'issue.unverified_none':
+            return lang === 'zh'
+                ? '没有关联 issue，不能证实“已修复”。'
+                : 'No linked issue, so a fix claim cannot be verified.';
+        case 'issue.unverified_unreadable':
+            return reason.number == null
+                ? (lang === 'zh' ? '关联 issue 的正文读不到。' : 'Linked issues could not be read.')
+                : (lang === 'zh'
+                    ? `issue #${reason.number} 读不到，不能判断它是否存在。`
+                    : `Issue #${reason.number} could not be read, so it is not clear that it exists.`);
+        default:
+            return '';
+    }
+}
+function countPhrase(passed, failed, skipped, lang) {
+    if (passed == null && failed == null) {
+        return lang === 'zh' ? '没有解析出测试数量。' : 'No test counts were parsed.';
+    }
+    const passedText = passed ?? 0;
+    const failedText = failed ?? 0;
+    const skippedText = skipped == null ? '' : (lang === 'zh' ? `，跳过 ${skipped}` : `, ${skipped} skipped`);
+    return lang === 'zh'
+        ? `解析数量：通过 ${passedText}，失败 ${failedText}${skippedText}。`
+        : `Parsed counts: ${passedText} passed, ${failedText} failed${skippedText}.`;
+}
+function checkKind(kind, lang) {
+    const en = { lint: 'lint', build: 'build', breaking: 'breaking-change' };
+    const zh = { lint: 'lint', build: '构建', breaking: '破坏性变更' };
+    return lang === 'zh' ? zh[kind] : en[kind];
 }
 function footer(report, lang) {
     const stamp = report.generatedAt;
@@ -36090,6 +36829,8 @@ function reasonText(reason, lang) {
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.run = run;
+const parse_1 = __nccwpck_require__(4481);
+const verify_1 = __nccwpck_require__(60);
 const config_1 = __nccwpck_require__(2973);
 const context_1 = __nccwpck_require__(788);
 const errors_1 = __nccwpck_require__(3916);
@@ -36099,6 +36840,7 @@ const render_1 = __nccwpck_require__(7055);
 const analyze_2 = __nccwpck_require__(8204);
 const links_1 = __nccwpck_require__(3189);
 const sticky_1 = __nccwpck_require__(6230);
+const text_1 = __nccwpck_require__(8992);
 const threshold_1 = __nccwpck_require__(852);
 async function run(deps) {
     const context = (0, context_1.resolvePrContext)(deps.input);
@@ -36132,23 +36874,49 @@ async function run(deps) {
         deps.io.warning(message);
     });
     const language = (0, config_1.parseLanguage)(deps.input.commentLanguage) ?? config.language;
+    const needFiles = config.checks.scope || config.checks.claims;
+    const needIssues = config.checks.scope || config.checks.claims;
+    const fileResult = needFiles ? await loadFiles(client, pr.number) : undefined;
+    const issueResult = needIssues ? await loadLinkedIssues(client, pr, context.number, config, prRepo) : undefined;
     const scope = config.checks.scope
-        ? await collectScope(client, pr, context, config, prRepo)
+        ? (0, analyze_2.analyzeScope)({
+            prRepo,
+            files: fileResult?.files ?? [],
+            issues: issueResult?.issues ?? [],
+            config: config.scope,
+            authorLogin: pr.authorLogin,
+            authorType: pr.authorType,
+            labels: pr.labels,
+            ...(fileResult?.error || issueResult?.error ? { apiError: fileResult?.error ?? issueResult?.error } : {}),
+            ...(fileResult?.error ? { filesUnavailable: true } : {}),
+        })
         : (0, analyze_2.skippedScope)();
-    const evidence = config.checks.testEvidence
-        ? await collectEvidence(client, context.sha, pr.headSha, config)
-        : (0, select_1.skippedEvidence)(context.sha);
+    const ci = await collectCi(client, context.sha, pr.headSha, config, {
+        evidence: config.checks.testEvidence,
+        claims: config.checks.claims,
+    });
     const packet = config.checks.reviewPacket
         ? (0, analyze_1.analyzePacket)(pr.body, config.reviewPacket)
         : (0, analyze_1.skippedPacket)();
+    const claims = config.checks.claims
+        ? await collectClaims(client, deps.io, pr, prRepo, config, {
+            files: fileResult?.error ? null : (fileResult?.files ?? null),
+            issues: issueResult?.issues ?? [],
+            testJobs: ci.testJobs,
+            jobs: ci.jobs,
+            checks: ci.checks,
+            ciError: ci.ciError,
+        })
+        : (0, verify_1.skippedClaims)();
     const report = {
         language,
         failOn,
         headSha: context.sha,
         generatedAt: (deps.now ?? (() => new Date()))().toISOString(),
         scope,
-        evidence,
+        evidence: ci.evidence,
         packet,
+        claims,
     };
     const body = (0, render_1.renderComment)(report, prRepo);
     let comments;
@@ -36173,25 +36941,42 @@ async function run(deps) {
         throw commentFailure(context.number, error);
     }
     deps.io.setOutput('scope-status', scope.status);
-    deps.io.setOutput('test-evidence-status', evidence.status);
+    deps.io.setOutput('test-evidence-status', ci.evidence.status);
     deps.io.setOutput('review-packet-status', packet.status);
+    deps.io.setOutput('claims-status', claims.status);
     deps.io.setOutput('comment-url', posted.url);
     deps.io.setOutput('head-sha', context.sha);
     await deps.io.writeSummary((0, render_1.renderSummary)(report, prRepo));
     deps.io.info(`Updated PR evidence comment: ${posted.url}`);
+    const contradicted = claims.results.filter((claim) => claim.verdict === 'contradicted');
+    if (contradicted.length > 0) {
+        const message = `Contradicted claim${contradicted.length === 1 ? '' : 's'} (${config.claims.contradicted}): ${contradicted.map((claim) => (0, text_1.inlineText)(claim.text, 80)).join('; ')}`;
+        if (config.claims.contradicted === 'error')
+            deps.io.error(message);
+        else
+            deps.io.warning(message);
+    }
     const failure = (0, threshold_1.thresholdFailure)(failOn, [
         { name: 'scope', status: scope.status },
-        { name: 'test-evidence', status: evidence.status },
+        { name: 'test-evidence', status: ci.evidence.status },
         { name: 'review-packet', status: packet.status },
+        { name: 'claims', status: claims.status },
     ]);
     if (failure)
         throw new errors_1.ActionFailure('threshold', failure);
     return { commentUrl: posted.url };
 }
-async function collectScope(client, pr, context, config, prRepo) {
+async function loadFiles(client, number) {
     try {
-        const files = await client.listFiles(pr.number);
-        const linked = await client.listClosingIssues(context.number);
+        return { files: await client.listFiles(number) };
+    }
+    catch (error) {
+        return { files: [], error: errorMessage(error) };
+    }
+}
+async function loadLinkedIssues(client, pr, number, config, prRepo) {
+    try {
+        const linked = await client.listClosingIssues(number);
         const refs = (0, links_1.extractClosingReferences)(`${pr.title}\n${pr.body}`, prRepo, config.scope.closingKeywords);
         const known = new Set(linked.issues.map((issue) => (0, links_1.issueKey)(issue.repo, issue.number)));
         const fetched = new Map();
@@ -36208,29 +36993,17 @@ async function collectScope(client, pr, context, config, prRepo) {
         }
         const issues = (0, links_1.mergeLinkedIssues)(linked.issues, refs, fetched);
         const apiError = issues.length === 0 && linked.error ? linked.error : undefined;
-        return (0, analyze_2.analyzeScope)({
-            prRepo,
-            files,
-            issues,
-            config: config.scope,
-            authorLogin: pr.authorLogin,
-            authorType: pr.authorType,
-            labels: pr.labels,
-            ...(apiError ? { apiError } : {}),
-        });
+        return { issues, ...(apiError ? { error: apiError } : {}) };
     }
     catch (error) {
-        return (0, analyze_2.analyzeScope)({
-            prRepo,
-            files: [],
-            issues: [],
-            config: config.scope,
-            apiError: errorMessage(error),
-            filesUnavailable: true,
-        });
+        return { issues: [], error: errorMessage(error) };
     }
 }
-async function collectEvidence(client, eventSha, apiSha, config) {
+async function collectCi(client, eventSha, apiSha, config, want) {
+    if (!want.evidence && !want.claims) {
+        return { evidence: (0, select_1.skippedEvidence)(eventSha), testJobs: [], jobs: [], checks: [], ciError: false };
+    }
+    const mismatch = eventSha !== apiSha ? { shaMismatch: { eventSha, apiSha } } : {};
     try {
         const jobs = await client.listWorkflowJobs(eventSha);
         const checks = await client.listCheckRuns(eventSha);
@@ -36258,6 +37031,9 @@ async function collectEvidence(client, eventSha, apiSha, config) {
                 status: job.status,
                 conclusion: job.conclusion,
                 ...(job.htmlUrl ? { url: job.htmlUrl } : {}),
+                ...(job.event ? { event: job.event } : {}),
+                ...(job.completedAt ? { completedAt: job.completedAt } : {}),
+                runId: job.runId,
                 text,
                 ...(logError ? { logError } : {}),
             });
@@ -36272,26 +37048,97 @@ async function collectEvidence(client, eventSha, apiSha, config) {
                 text: check.summary ?? null,
             });
         }
-        return (0, select_1.buildEvidence)({
+        const parsed = (0, select_1.buildEvidence)({
             sha: eventSha,
             items,
             config: config.testEvidence,
             consideredJobs: jobs.length,
             consideredChecks: checks.length,
-            ...(eventSha !== apiSha ? { shaMismatch: { eventSha, apiSha } } : {}),
+            ...mismatch,
         });
+        return {
+            evidence: want.evidence ? parsed : (0, select_1.skippedEvidence)(eventSha),
+            testJobs: parsed.jobs,
+            jobs,
+            checks,
+            ciError: false,
+        };
     }
     catch (error) {
-        return (0, select_1.buildEvidence)({
+        const parsed = (0, select_1.buildEvidence)({
             sha: eventSha,
             items: [],
             config: config.testEvidence,
             apiError: errorMessage(error),
             consideredJobs: 0,
             consideredChecks: 0,
-            ...(eventSha !== apiSha ? { shaMismatch: { eventSha, apiSha } } : {}),
+            ...mismatch,
         });
+        return {
+            evidence: want.evidence ? parsed : (0, select_1.skippedEvidence)(eventSha),
+            testJobs: [],
+            jobs: [],
+            checks: [],
+            ciError: true,
+        };
     }
+}
+async function collectClaims(client, io, pr, prRepo, config, evidence) {
+    let commits = [];
+    let scannedCommits = false;
+    if (config.claims.scanCommits) {
+        try {
+            commits = await client.listPullCommits(pr.number);
+            scannedCommits = true;
+        }
+        catch (error) {
+            io.warning(`Could not read pull request commits: ${errorMessage(error)}. Commit messages were not scanned.`);
+        }
+    }
+    const parsed = (0, parse_1.parseClaims)({
+        title: pr.title,
+        body: pr.body,
+        commits,
+        patterns: config.claims.patterns,
+        scanCommits: scannedCommits,
+    });
+    const resolvedIssues = await resolveClaimIssues(client, prRepo, parsed, evidence.issues);
+    return (0, verify_1.verifyClaims)({
+        claims: parsed,
+        config: config.claims,
+        testJobs: evidence.testJobs,
+        jobs: evidence.jobs,
+        checks: evidence.checks,
+        files: evidence.files,
+        issues: evidence.issues,
+        resolvedIssues,
+        ciError: evidence.ciError,
+        scanCommits: scannedCommits,
+    });
+}
+async function resolveClaimIssues(client, prRepo, claims, issues) {
+    const resolved = new Map();
+    const numbers = [...new Set(claims.flatMap((claim) => claim.issueNumber == null ? [] : [claim.issueNumber]))];
+    for (const number of numbers) {
+        const known = issues.filter((issue) => issue.number === number && issue.repo.toLowerCase() === prRepo.toLowerCase());
+        const confirmed = known.find(verify_1.confirmedIssue);
+        if (confirmed) {
+            resolved.set(number, { number, state: 'found', title: confirmed.title, linked: true });
+            continue;
+        }
+        try {
+            const loaded = await client.getIssue(prRepo, number);
+            if (!loaded) {
+                resolved.set(number, { number, state: 'missing', title: '', linked: known.length > 0 });
+                continue;
+            }
+            resolved.set(number, { number, state: 'found', title: loaded.title, linked: known.length > 0 });
+        }
+        catch {
+            resolved.set(number, { number, state: 'error', title: '', linked: known.length > 0 });
+        }
+    }
+    return resolved;
 }
 function commentFailure(number, error) {
     if (error instanceof errors_1.GitHubHttpError && (error.status === 401 || error.status === 403 || error.status === 404)) {

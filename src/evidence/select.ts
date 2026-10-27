@@ -98,6 +98,9 @@ function toJobReport(item: EvidenceItem, parseLogs: boolean): EvidenceJobReport 
     status: item.status,
     conclusion: item.conclusion,
     ...(item.url ? { url: item.url } : {}),
+    ...(item.event ? { event: item.event } : {}),
+    ...(item.completedAt ? { completedAt: item.completedAt } : {}),
+    ...(item.runId != null ? { runId: item.runId } : {}),
   }
   if (item.status !== 'completed') {
     return { ...base, counts: null, note: 'in_progress' }

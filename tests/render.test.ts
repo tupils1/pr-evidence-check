@@ -5,6 +5,7 @@ import { analyzePacket } from '../src/packet/analyze'
 import { renderComment, sortFiles } from '../src/render'
 import { analyzeScope } from '../src/scope/analyze'
 import { findSticky } from '../src/sticky'
+import { skippedClaims } from '../src/claims/verify'
 import type { ChangedFile, LinkedIssue, Report } from '../src/types'
 
 const issue: LinkedIssue = {
@@ -59,6 +60,7 @@ function reportFor(language: Report['language']): Report {
     scope,
     evidence,
     packet,
+    claims: skippedClaims(),
   }
 }
 
