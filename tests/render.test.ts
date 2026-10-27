@@ -30,6 +30,7 @@ function reportFor(language: Report['language']): Report {
       changed('src/auth/login.ts'),
       changed('src/billing/invoice.ts', { additions: 40, deletions: 20 }),
       changed('src/billing/tax.ts'),
+      changed('src/billing/refund.ts'),
       changed('.github/workflows/ci.yml'),
       changed('package-lock.json', { additions: 500, deletions: 4, patch: '+\n+"session"\n' }),
     ],

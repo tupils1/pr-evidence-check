@@ -17,6 +17,8 @@ scope:
   large-file-lines: 300
   # Error (instead of warn) when at least this many judged files are outside scope
   # and they are at least this fraction of the judged files.
+  # Unmentioned sensitive paths (lockfiles, workflows, secrets, ...) are warned
+  # on their own and are not counted here, so they cannot trip the error alone.
   outside-scope-error-min: 3
   outside-scope-error-ratio: 0.5
   # These paths are not judged for scope. Sensitive-path rules still apply.

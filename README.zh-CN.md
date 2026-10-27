@@ -123,8 +123,8 @@ npm run demo
 | 没有关联 issue | warn |
 | 没有关联 issue，且作者是机器人、改动只有文档或只命中 `ignore-paths`、或 PR 带有 skip label | info |
 | 有文件超出 issue | warn |
-| 至少 3 个被判断的文件，且至少一半超出 issue | error |
-| issue 没提到的敏感路径 | warn |
+| 至少 3 个被判断的文件（不计入 issue 没提到的敏感路径），且其中至少一半超出 issue | error |
+| issue 没提到的敏感路径 | warn。这些路径不计入超出范围的 error 比例 |
 | diff 达到 400 行或 20 个文件 | warn |
 | 这个 SHA 上没有像测试的 job 或 check | info |
 | 命中的测试 job 失败、超时或取消 | warn |

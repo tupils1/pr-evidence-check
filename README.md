@@ -123,8 +123,8 @@ Default severities:
 | No linked issue | warn |
 | No linked issue, and the author is a bot, the diff is docs-only or only matches `ignore-paths`, or the pull request has a skip label | info |
 | Any file outside the issue | warn |
-| At least 3 judged files and at least half of them outside the issue | error |
-| Sensitive path the issue does not mention | warn |
+| At least 3 judged files, not counting unmentioned sensitive paths, and at least half of those files outside the issue | error |
+| Sensitive path the issue does not mention | warn. These paths are not counted in the outside-scope error ratio |
 | Diff reaches 400 lines or 20 files | warn |
 | No test-like job or check on the SHA | info |
 | A matched test job failed, timed out, or was cancelled | warn |

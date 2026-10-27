@@ -23,6 +23,7 @@ const scope = analyzeScope({
     { filename: 'src/auth/login.ts', status: 'modified', additions: 40, deletions: 2 },
     { filename: 'src/billing/invoice.ts', status: 'modified', additions: 220, deletions: 80 },
     { filename: 'src/billing/tax.ts', status: 'added', additions: 30, deletions: 0 },
+    { filename: 'src/billing/refund.ts', status: 'added', additions: 24, deletions: 0 },
     { filename: '.github/workflows/ci.yml', status: 'modified', additions: 12, deletions: 0 },
     {
       filename: 'package-lock.json',

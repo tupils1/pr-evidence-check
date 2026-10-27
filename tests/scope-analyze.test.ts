@@ -133,6 +133,39 @@ describe('scope vs linked issue', () => {
     })
     expect(two.files.filter((file) => file.verdict === 'outside_scope')).toHaveLength(2)
     expect(two.status).toBe('warn')
+
+    const infra = analyzeScope({
+      prRepo: 'acme/app',
+      config: scope(),
+      issues: [loginIssue],
+      files: [
+        changed({ filename: 'src/billing/invoice.ts' }),
+        changed({ filename: 'src/billing/tax.ts' }),
+        changed({ filename: 'package-lock.json' }),
+        changed({ filename: '.github/workflows/ci.yml' }),
+      ],
+    })
+    expect(infra.files.filter((file) => file.verdict === 'outside_scope')).toHaveLength(4)
+    expect(infra.signals.some((signal) => signal.id === 'scope.outside_ratio')).toBe(false)
+    expect(infra.signals.some((signal) => signal.id === 'scope.sensitive')).toBe(true)
+    expect(infra.status).toBe('warn')
+
+    const mostlyOutside = analyzeScope({
+      prRepo: 'acme/app',
+      config: scope(),
+      issues: [loginIssue],
+      files: [
+        changed({ filename: 'src/billing/invoice.ts' }),
+        changed({ filename: 'src/billing/tax.ts' }),
+        changed({ filename: 'src/billing/refund.ts' }),
+        changed({ filename: 'package-lock.json' }),
+        changed({ filename: '.github/workflows/ci.yml' }),
+      ],
+    })
+    expect(mostlyOutside.status).toBe('error')
+    const ratio = mostlyOutside.signals.find((signal) => signal.id === 'scope.outside_ratio')
+    expect(ratio && ratio.id === 'scope.outside_ratio' && ratio.outside).toBe(3)
+    expect(ratio && ratio.id === 'scope.outside_ratio' && ratio.judged).toBe(3)
   })
 
   it('does not treat generic directories as scope evidence', () => {

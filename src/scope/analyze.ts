@@ -264,7 +264,7 @@ function collectSignals(
     })
   }
 
-  const judged = files.filter((file) => file.verdict === 'in_scope' || file.verdict === 'outside_scope')
+  const judged = files.filter((file) => countsTowardOutsideRatio(file))
   const outside = judged.filter((file) => file.verdict === 'outside_scope')
   if (judged.length > 0 && outside.length >= input.config.outsideScopeErrorMin) {
     const ratio = outside.length / judged.length
@@ -368,6 +368,13 @@ function noLinkedIssueSignal(
   const filesReason = quietFilesReason(files, input.config)
   if (filesReason) return { id: 'scope.no_linked_issue', level: 'info', quiet: filesReason }
   return { id: 'scope.no_linked_issue', level: 'warn' }
+}
+
+function countsTowardOutsideRatio(file: ScopeFileReport): boolean {
+  if (file.verdict !== 'in_scope' && file.verdict !== 'outside_scope') return false
+  // An unmentioned lockfile or workflow already raises scope.sensitive.
+  // Leave it out of the error ratio so infra files cannot trip that threshold alone.
+  return !file.sensitive.some((hit) => !hit.mentioned)
 }
 
 function quietFilesReason(
