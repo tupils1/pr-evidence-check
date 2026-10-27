@@ -1,1 +1,1 @@
-export const taxNote = 'billing fixture, unrelated to the session timeout note'
+export const taxNote = 'catalog rate'

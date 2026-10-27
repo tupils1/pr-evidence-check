@@ -1,1 +1,1 @@
-export const invoiceNote = 'billing fixture, unrelated to the session timeout note'
+export const invoiceNote = 'catalog line item'
