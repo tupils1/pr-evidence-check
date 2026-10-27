@@ -8,6 +8,8 @@ import type { Report } from '../src/types'
 const config = defaultConfig()
 const prRepo = 'acme/app'
 
+// The sample refreshes the session token before login gives up.
+
 const scope = analyzeScope({
   prRepo,
   config: config.scope,
