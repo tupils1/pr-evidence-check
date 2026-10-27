@@ -7,7 +7,7 @@ import { buildEvidence } from '../src/evidence/select'
 import { renderComment } from '../src/render'
 import { analyzePacket } from '../src/packet/analyze'
 import { analyzeScope } from '../src/scope/analyze'
-import type { ChangedFile, ClaimReason, ClaimResult, EvidenceJobReport, LinkedIssue, Report } from '../src/types'
+import type { ChangedFile, ClaimReason, ClaimResult, EvidenceJobReport, LinkedIssue, ParsedCounts, Report } from '../src/types'
 
 const patterns = defaultConfig().claims.patterns
 
@@ -27,6 +27,17 @@ function job(partial: Partial<EvidenceJobReport> & Pick<EvidenceJobReport, 'name
     status: 'completed',
     counts: null,
     ...partial,
+  }
+}
+
+function counts(passed: number, failed = 0, skipped = 0): ParsedCounts {
+  return {
+    framework: 'vitest',
+    passed,
+    failed,
+    skipped,
+    total: passed + failed + skipped,
+    detail: 'vitest',
   }
 }
 
@@ -185,6 +196,100 @@ describe('claim verdicts', () => {
       })],
     }).results[0]?.reason.code).toBe('tests.unverified_zero')
     expect(verify('all tests pass', { ciError: true }).results[0]?.reason.code).toBe('tests.unverified_api')
+  })
+
+  it('counts one run when push and pull_request repeat the same job', () => {
+    const later = verify('all tests pass', {
+      testJobs: [
+        job({
+          name: 'test',
+          workflowName: 'CI',
+          conclusion: 'success',
+          event: 'push',
+          completedAt: '2026-10-27T15:50:00Z',
+          runId: 1,
+          counts: counts(87),
+        }),
+        job({
+          name: 'Test',
+          workflowName: 'ci',
+          conclusion: 'success',
+          event: 'pull_request',
+          completedAt: '2026-10-27T15:51:00Z',
+          runId: 2,
+          counts: counts(87, 0, 2),
+        }),
+        job({
+          name: 'integration',
+          workflowName: 'CI',
+          conclusion: 'success',
+          event: 'pull_request',
+          completedAt: '2026-10-27T15:51:00Z',
+          runId: 2,
+          counts: counts(3),
+        }),
+      ],
+    })
+    expect(later.results[0]?.reason).toMatchObject({ code: 'tests.verified', passed: 90, failed: 0, skipped: 2 })
+
+    const tied = verify('all tests pass', {
+      testJobs: [
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'push', completedAt: '2026-10-27T15:50:00Z', runId: 9, counts: counts(1) }),
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'pull_request', completedAt: '2026-10-27T15:50:00Z', runId: 2, counts: counts(4, 0, 1) }),
+      ],
+    })
+    expect(tied.results[0]?.reason).toMatchObject({ code: 'tests.verified', passed: 4, failed: 0, skipped: 1 })
+
+    const newestFailure = verify('tests pass', {
+      testJobs: [
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'pull_request', completedAt: '2026-10-27T15:50:00Z', runId: 2, counts: counts(87) }),
+        job({ name: 'test', workflowName: 'CI', conclusion: 'failure', event: 'push', completedAt: '2026-10-27T15:52:00Z', runId: 3, counts: counts(86, 1) }),
+      ],
+    })
+    expect(newestFailure.results[0]?.reason).toMatchObject({ code: 'tests.contradicted', jobs: ['CI / test'], passed: 86, failed: 1 })
+
+    const olderFailure = verify('测试全部通过', {
+      testJobs: [
+        job({ name: 'test', workflowName: 'CI', conclusion: 'failure', event: 'push', completedAt: '2026-10-27T15:50:00Z', runId: 1, counts: counts(86, 1) }),
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'pull_request', completedAt: '2026-10-27T15:51:00Z', runId: 2, counts: counts(87) }),
+      ],
+    })
+    expect(olderFailure.results[0]?.verdict).toBe('contradicted')
+    expect(olderFailure.results[0]?.reason).toMatchObject({ code: 'tests.contradicted', passed: 87, failed: 0 })
+
+    const parsedFailure = verify('all tests pass', {
+      testJobs: [
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'push', completedAt: '2026-10-27T15:49:00Z', runId: 1, counts: counts(3, 1) }),
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'pull_request', completedAt: '2026-10-27T15:51:00Z', runId: 2, counts: counts(4) }),
+      ],
+    })
+    expect(parsedFailure.results[0]?.verdict).toBe('contradicted')
+    expect(parsedFailure.results[0]?.reason).toMatchObject({ passed: 4, failed: 0 })
+
+    const sameEvent = verify('all tests pass', {
+      testJobs: [
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'pull_request', runId: 1, counts: counts(2) }),
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'pull_request', runId: 2, counts: counts(2) }),
+      ],
+    })
+    expect(sameEvent.results[0]?.reason).toMatchObject({ passed: 4, failed: 0 })
+
+    const otherEvent = verify('all tests pass', {
+      testJobs: [
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'push', completedAt: '2026-10-27T15:50:00Z', runId: 1, counts: counts(10) }),
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'pull_request', completedAt: '2026-10-27T15:51:00Z', runId: 2, counts: counts(10) }),
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'workflow_dispatch', completedAt: '2026-10-27T15:52:00Z', runId: 3, counts: counts(10) }),
+      ],
+    })
+    expect(otherEvent.results[0]?.reason).toMatchObject({ passed: 20, failed: 0 })
+
+    const running = verify('all tests pass', {
+      testJobs: [
+        job({ name: 'test', workflowName: 'CI', conclusion: 'success', event: 'push', completedAt: '2026-10-27T15:50:00Z', runId: 1, counts: counts(5) }),
+        job({ name: 'test', workflowName: 'CI', conclusion: null, status: 'in_progress', event: 'pull_request', runId: 4, counts: null }),
+      ],
+    })
+    expect(running.results[0]?.reason).toMatchObject({ code: 'tests.verified', passed: 5, failed: 0 })
   })
 
   it('judges lint, build, and breaking checks from job and check names', () => {

@@ -156,11 +156,15 @@ describe('evidence status', () => {
         workflowName: 'CI',
         status: 'completed',
         conclusion: 'success',
+        event: 'pull_request',
+        completedAt: '2026-10-27T15:51:00Z',
+        runId: 2,
         text: 'Tests:       4 passed, 4 total',
       }],
     })
     expect(parsed.status).toBe('pass')
     expect(parsed.jobs[0]?.counts?.passed).toBe(4)
+    expect(parsed.jobs[0]).toMatchObject({ event: 'pull_request', completedAt: '2026-10-27T15:51:00Z', runId: 2 })
     expect(parsed.signals.some((signal) => signal.id === 'test_evidence.not_rerun')).toBe(true)
 
     const unparsed = buildEvidence({

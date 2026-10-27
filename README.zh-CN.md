@@ -30,7 +30,7 @@ action 读取 PR 标题和描述。`claims.scan-commits` 为 true 时也读提�
 
 `claims.contradicted` 默认是 `warn`。除非 `fail-on` 是 `warning` 或 `error`，job 仍然成功。`claims.scan-commits` 默认 false。被否定的短语（`not all tests pass`、`没有测试全部通过`）会忽略。围栏代码块和 HTML 注释会忽略。`.github/pr-evidence.yml` 里的 `patterns` 列表会替换内置短语。模式是 JavaScript 正则，开头的 `(?i)` 表示不区分大小写。`linked_issue` 的模式可以用第一个捕获组取出 issue 编号。
 
-这不证明 diff 是对的。`fixed #12` 只说明 issue 存在并且被引用，不说明改动修好了它。没有名称像破坏性变更的检查时，`no breaking changes` 保持未证实。`all tests pass` 信任已有 CI 结论和解析数量，不会重新跑测试。
+这不证明 diff 是对的。`fixed #12` 只说明 issue 存在并且被引用，不说明改动修好了它。没有名称像破坏性变更的检查时，`no breaking changes` 保持未证实。`all tests pass` 信任已有 CI 结论和解析数量，不会重新跑测试。同一个 workflow、同一个 job 名在这个 head SHA 上既有 `push` 又有 `pull_request` 时，解析数量只计一次：用最晚结束的那次；结束时间相同则用 `pull_request`。其中任何一次失败，声明仍然相矛盾。其他 job 的数量仍会相加。
 
 [AgentClaimGuard](https://github.com/konoeph/AgentClaimGuard) 是 Python 策略门，核对结构化声明和调用方提供的证据。[agent-receipts](https://github.com/inchwormz/agent-receipts) 是本地哈希链运行时，只有仓库检查绑定到精确字节时才提升声明。[obsigna](https://github.com/agent-receipts/obsigna) 验证已签名的收据链。这个 action 不签名，也不要求代理配合。它只把 PR 上已经写下的短语和 CI、diff、关联 issue 对照，默认警告，不阻断。
 

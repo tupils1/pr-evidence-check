@@ -34315,8 +34315,9 @@ function judgeTests(jobs, ciError) {
         return { code: 'tests.unverified_api' };
     if (jobs.length === 0)
         return { code: 'tests.unverified_none' };
-    const counts = sumCounts(jobs);
-    const failed = jobs.filter((job) => FAILED.has(job.conclusion ?? '') || (job.counts?.failed ?? 0) > 0);
+    const counted = collapseEventDuplicates(jobs);
+    const counts = sumCounts(counted);
+    const failed = counted.filter((job) => FAILED.has(job.conclusion ?? '') || (job.counts?.failed ?? 0) > 0);
     if (failed.length > 0) {
         return {
             code: 'tests.contradicted',
@@ -34325,10 +34326,10 @@ function judgeTests(jobs, ciError) {
             failed: counts?.failed ?? null,
         };
     }
-    const running = jobs.filter((job) => job.status !== 'completed');
+    const running = counted.filter((job) => job.status !== 'completed');
     if (running.length > 0)
         return { code: 'tests.unverified_running', jobs: names(running.map(displayEvidence)) };
-    const completed = jobs.filter((job) => job.status === 'completed');
+    const completed = counted.filter((job) => job.status === 'completed');
     const good = completed.filter((job) => PASSED.has(job.conclusion ?? ''));
     if (good.length === 0)
         return { code: 'tests.unverified_skipped' };
@@ -34406,6 +34407,60 @@ function matchNamed(jobs, checks, patterns) {
         })),
         ...matchedChecks.map((check) => ({ name: check.name, status: check.status, conclusion: check.conclusion })),
     ];
+}
+function collapseEventDuplicates(jobs) {
+    const buckets = new Map();
+    const rest = [];
+    for (const job of jobs) {
+        if (job.event !== 'push' && job.event !== 'pull_request') {
+            rest.push(job);
+            continue;
+        }
+        const key = `${job.workflowName ?? ''}\0${job.name}`.toLowerCase();
+        const bucket = buckets.get(key);
+        if (bucket)
+            bucket.push(job);
+        else
+            buckets.set(key, [job]);
+    }
+    const chosen = [];
+    for (const bucket of buckets.values()) {
+        const events = new Set(bucket.map((job) => job.event));
+        if (bucket.length > 1 && events.has('push') && events.has('pull_request'))
+            chosen.push(representDuplicate(bucket));
+        else
+            chosen.push(...bucket);
+    }
+    return [...rest, ...chosen];
+}
+function representDuplicate(jobs) {
+    const preferred = [...jobs].sort(byPreferredRun)[0];
+    if (!preferred)
+        return jobs[0];
+    const failing = jobs.find((job) => FAILED.has(job.conclusion ?? '') || (job.counts?.failed ?? 0) > 0);
+    if (!failing)
+        return preferred;
+    if (FAILED.has(preferred.conclusion ?? '') || (preferred.counts?.failed ?? 0) > 0)
+        return preferred;
+    return { ...preferred, conclusion: FAILED.has(failing.conclusion ?? '') ? failing.conclusion : 'failure' };
+}
+function byPreferredRun(a, b) {
+    const completed = Number(b.status === 'completed') - Number(a.status === 'completed');
+    if (completed !== 0)
+        return completed;
+    const time = completedMillis(b) - completedMillis(a);
+    if (time !== 0)
+        return time;
+    const pullRequest = Number(b.event === 'pull_request') - Number(a.event === 'pull_request');
+    if (pullRequest !== 0)
+        return pullRequest;
+    return (b.runId ?? 0) - (a.runId ?? 0);
+}
+function completedMillis(job) {
+    if (job.status !== 'completed' || !job.completedAt)
+        return 0;
+    const parsed = Date.parse(job.completedAt);
+    return Number.isFinite(parsed) ? parsed : 0;
 }
 function sumCounts(jobs) {
     const counted = jobs.filter((job) => job.counts);
@@ -35370,6 +35425,9 @@ function toJobReport(item, parseLogs) {
         status: item.status,
         conclusion: item.conclusion,
         ...(item.url ? { url: item.url } : {}),
+        ...(item.event ? { event: item.event } : {}),
+        ...(item.completedAt ? { completedAt: item.completedAt } : {}),
+        ...(item.runId != null ? { runId: item.runId } : {}),
     };
     if (item.status !== 'completed') {
         return { ...base, counts: null, note: 'in_progress' };
@@ -35583,6 +35641,8 @@ function createGitHubClient(options) {
                 if (!runId)
                     continue;
                 const workflowName = (0, text_1.asString)(record?.name) ?? '';
+                const event = (0, text_1.asString)(record?.event) ?? '';
+                const runUpdatedAt = (0, text_1.asString)(record?.updated_at);
                 const rows = await paginate(transport, 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs', {
                     owner,
                     repo,
@@ -35592,7 +35652,7 @@ function createGitHubClient(options) {
                     return Array.isArray(body?.jobs) ? body.jobs : [];
                 }, 100);
                 for (const row of rows) {
-                    const job = toWorkflowJob(row, workflowName, runId);
+                    const job = toWorkflowJob(row, workflowName, runId, event, runUpdatedAt);
                     if (job)
                         jobs.push(job);
                     if (jobs.length >= 200)
@@ -35727,19 +35787,23 @@ function toCheckRun(value) {
         ...(summary ? { summary } : {}),
     };
 }
-function toWorkflowJob(value, workflowName, runId) {
+function toWorkflowJob(value, workflowName, runId, event, runUpdatedAt) {
     const record = (0, text_1.asRecord)(value);
     const id = (0, text_1.asNumber)(record?.id);
     if (!id)
         return undefined;
+    const status = (0, text_1.asString)(record?.status) ?? 'completed';
+    const completedAt = (0, text_1.asString)(record?.completed_at) ?? (status === 'completed' ? runUpdatedAt : undefined);
     return {
         id,
         name: (0, text_1.asString)(record?.name) ?? '',
         workflowName,
-        status: (0, text_1.asString)(record?.status) ?? 'completed',
+        status,
         conclusion: typeof record?.conclusion === 'string' ? record.conclusion : null,
         ...((0, text_1.asString)(record?.html_url) ? { htmlUrl: (0, text_1.asString)(record?.html_url) } : {}),
         runId,
+        ...(event ? { event } : {}),
+        ...(completedAt ? { completedAt } : {}),
     };
 }
 function toGraphqlIssue(value) {
@@ -36967,6 +37031,9 @@ async function collectCi(client, eventSha, apiSha, config, want) {
                 status: job.status,
                 conclusion: job.conclusion,
                 ...(job.htmlUrl ? { url: job.htmlUrl } : {}),
+                ...(job.event ? { event: job.event } : {}),
+                ...(job.completedAt ? { completedAt: job.completedAt } : {}),
+                runId: job.runId,
                 text,
                 ...(logError ? { logError } : {}),
             });

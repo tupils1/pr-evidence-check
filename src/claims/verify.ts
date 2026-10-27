@@ -142,8 +142,9 @@ function verdictFor(reason: ClaimReason): ClaimVerdict {
 function judgeTests(jobs: readonly EvidenceJobReport[], ciError: boolean): ClaimReason {
   if (ciError && jobs.length === 0) return { code: 'tests.unverified_api' }
   if (jobs.length === 0) return { code: 'tests.unverified_none' }
-  const counts = sumCounts(jobs)
-  const failed = jobs.filter((job) => FAILED.has(job.conclusion ?? '') || (job.counts?.failed ?? 0) > 0)
+  const counted = collapseEventDuplicates(jobs)
+  const counts = sumCounts(counted)
+  const failed = counted.filter((job) => FAILED.has(job.conclusion ?? '') || (job.counts?.failed ?? 0) > 0)
   if (failed.length > 0) {
     return {
       code: 'tests.contradicted',
@@ -152,9 +153,9 @@ function judgeTests(jobs: readonly EvidenceJobReport[], ciError: boolean): Claim
       failed: counts?.failed ?? null,
     }
   }
-  const running = jobs.filter((job) => job.status !== 'completed')
+  const running = counted.filter((job) => job.status !== 'completed')
   if (running.length > 0) return { code: 'tests.unverified_running', jobs: names(running.map(displayEvidence)) }
-  const completed = jobs.filter((job) => job.status === 'completed')
+  const completed = counted.filter((job) => job.status === 'completed')
   const good = completed.filter((job) => PASSED.has(job.conclusion ?? ''))
   if (good.length === 0) return { code: 'tests.unverified_skipped' }
   const zeroOnly = good.every((job) => job.note === 'zero_tests' || (job.counts != null && job.counts.total === 0))
@@ -243,6 +244,53 @@ function matchNamed(
     })),
     ...matchedChecks.map((check) => ({ name: check.name, status: check.status, conclusion: check.conclusion })),
   ]
+}
+
+function collapseEventDuplicates(jobs: readonly EvidenceJobReport[]): EvidenceJobReport[] {
+  const buckets = new Map<string, EvidenceJobReport[]>()
+  const rest: EvidenceJobReport[] = []
+  for (const job of jobs) {
+    if (job.event !== 'push' && job.event !== 'pull_request') {
+      rest.push(job)
+      continue
+    }
+    const key = `${job.workflowName ?? ''}\0${job.name}`.toLowerCase()
+    const bucket = buckets.get(key)
+    if (bucket) bucket.push(job)
+    else buckets.set(key, [job])
+  }
+  const chosen: EvidenceJobReport[] = []
+  for (const bucket of buckets.values()) {
+    const events = new Set(bucket.map((job) => job.event))
+    if (bucket.length > 1 && events.has('push') && events.has('pull_request')) chosen.push(representDuplicate(bucket))
+    else chosen.push(...bucket)
+  }
+  return [...rest, ...chosen]
+}
+
+function representDuplicate(jobs: readonly EvidenceJobReport[]): EvidenceJobReport {
+  const preferred = [...jobs].sort(byPreferredRun)[0]
+  if (!preferred) return jobs[0] as EvidenceJobReport
+  const failing = jobs.find((job) => FAILED.has(job.conclusion ?? '') || (job.counts?.failed ?? 0) > 0)
+  if (!failing) return preferred
+  if (FAILED.has(preferred.conclusion ?? '') || (preferred.counts?.failed ?? 0) > 0) return preferred
+  return { ...preferred, conclusion: FAILED.has(failing.conclusion ?? '') ? failing.conclusion : 'failure' }
+}
+
+function byPreferredRun(a: EvidenceJobReport, b: EvidenceJobReport): number {
+  const completed = Number(b.status === 'completed') - Number(a.status === 'completed')
+  if (completed !== 0) return completed
+  const time = completedMillis(b) - completedMillis(a)
+  if (time !== 0) return time
+  const pullRequest = Number(b.event === 'pull_request') - Number(a.event === 'pull_request')
+  if (pullRequest !== 0) return pullRequest
+  return (b.runId ?? 0) - (a.runId ?? 0)
+}
+
+function completedMillis(job: EvidenceJobReport): number {
+  if (job.status !== 'completed' || !job.completedAt) return 0
+  const parsed = Date.parse(job.completedAt)
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 function sumCounts(jobs: readonly EvidenceJobReport[]): { passed: number; failed: number; skipped: number } | null {

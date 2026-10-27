@@ -179,6 +179,8 @@ export function createGitHubClient(options: {
         const runId = asNumber(record?.id)
         if (!runId) continue
         const workflowName = asString(record?.name) ?? ''
+        const event = asString(record?.event) ?? ''
+        const runUpdatedAt = asString(record?.updated_at)
         const rows = await paginate(transport, 'GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs', {
           owner,
           repo,
@@ -188,7 +190,7 @@ export function createGitHubClient(options: {
           return Array.isArray(body?.jobs) ? body.jobs : []
         }, 100)
         for (const row of rows) {
-          const job = toWorkflowJob(row, workflowName, runId)
+          const job = toWorkflowJob(row, workflowName, runId, event, runUpdatedAt)
           if (job) jobs.push(job)
           if (jobs.length >= 200) return jobs
         }
@@ -333,18 +335,28 @@ function toCheckRun(value: unknown): CheckRunInfo {
   }
 }
 
-function toWorkflowJob(value: unknown, workflowName: string, runId: number): WorkflowJobInfo | undefined {
+function toWorkflowJob(
+  value: unknown,
+  workflowName: string,
+  runId: number,
+  event: string,
+  runUpdatedAt: string | undefined,
+): WorkflowJobInfo | undefined {
   const record = asRecord(value)
   const id = asNumber(record?.id)
   if (!id) return undefined
+  const status = asString(record?.status) ?? 'completed'
+  const completedAt = asString(record?.completed_at) ?? (status === 'completed' ? runUpdatedAt : undefined)
   return {
     id,
     name: asString(record?.name) ?? '',
     workflowName,
-    status: asString(record?.status) ?? 'completed',
+    status,
     conclusion: typeof record?.conclusion === 'string' ? record.conclusion : null,
     ...(asString(record?.html_url) ? { htmlUrl: asString(record?.html_url) } : {}),
     runId,
+    ...(event ? { event } : {}),
+    ...(completedAt ? { completedAt } : {}),
   }
 }
 
