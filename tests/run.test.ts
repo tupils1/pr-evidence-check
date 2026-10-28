@@ -65,11 +65,17 @@ class FakeClient {
   commitError = ''
   commits: { sha: string; message: string }[] = []
   fetchedIssues = new Map<number, LinkedIssue | null>()
+  repoFiles = new Map<string, { text: string | null; error?: string }>()
 
   client(): GitHubClient {
     return {
       getPullRequest: async () => pull(this.pullOverrides),
-      getRepoFile: async () => ({ text: this.configText, ...(this.configError ? { error: this.configError } : {}) }),
+      getRepoFile: async (path, ref) => {
+        if (path.includes('pr-evidence')) {
+          return { text: this.configText, ...(this.configError ? { error: this.configError } : {}) }
+        }
+        return this.repoFiles.get(`${ref}\n${path}`) ?? { text: null }
+      },
       listFiles: async () => {
         this.listFilesCalled += 1
         if (this.fileError) throw new Error(this.fileError)
@@ -259,18 +265,27 @@ describe('run', () => {
     expect(fake.comments[0]?.body).toContain('Disabled in config')
   })
 
-  it('does not list files when scope is disabled, and still comments if the files API fails', async () => {
+  it('does not list files when no check needs them, and still comments if the files API fails', async () => {
     const disabled = new FakeClient()
-    disabled.configText = 'checks:\n  scope: false\n  claims: false\n'
-    await run({ io: io(), input: input(), createClient: () => disabled.client(), now: () => new Date('2026-10-27T00:00:00.000Z') })
+    disabled.configText = 'checks:\n  scope: false\n  claims: false\n  lockfile-provenance: false\n'
+    const quiet = io()
+    await run({ io: quiet, input: input(), createClient: () => disabled.client(), now: () => new Date('2026-10-27T00:00:00.000Z') })
     expect(disabled.listFilesCalled).toBe(0)
+    expect(quiet.outputs['lockfile-provenance-status']).toBe('skipped')
+
+    const provenanceOnly = new FakeClient()
+    provenanceOnly.configText = 'checks:\n  scope: false\n  claims: false\n'
+    await run({ io: io(), input: input(), createClient: () => provenanceOnly.client(), now: () => new Date('2026-10-27T00:00:00.000Z') })
+    expect(provenanceOnly.listFilesCalled).toBe(1)
 
     const broken = new FakeClient()
     broken.fileError = 'GitHub API 500'
     const actions = io()
     await run({ io: actions, input: input(), createClient: () => broken.client(), now: () => new Date('2026-10-27T00:00:00.000Z') })
     expect(actions.outputs['scope-status']).toBe('warn')
+    expect(actions.outputs['lockfile-provenance-status']).toBe('pass')
     expect(broken.comments[0]?.body).toContain('scope.api_error')
+    expect(broken.comments[0]?.body).toContain('lockfile_provenance.files_unreadable')
     expect(broken.comments[0]?.body).not.toContain('changes no files')
   })
 
@@ -466,4 +481,96 @@ describe('run', () => {
     expect(actions.warnings.some((warning) => warning.includes('Using defaults'))).toBe(true)
     expect(actions.outputs['scope-status']).toBe('pass')
   })
+
+  it('lists new lockfile packages and does not fail the job when provenance is unknown', async () => {
+    const fake = new FakeClient()
+    const base = 'b'.repeat(40)
+    fake.files = [
+      { filename: 'package-lock.json', status: 'modified', additions: 20, deletions: 2 },
+      { filename: 'README.md', status: 'modified', additions: 1, deletions: 0 },
+    ]
+    fake.repoFiles.set(`${base}\npackage-lock.json`, { text: npmLock(['left-pad@1.3.0']) })
+    fake.repoFiles.set(`${SHA}\npackage-lock.json`, { text: npmLock(['left-pad@1.3.0', 'fresh@2.0.0', 'git-dep@1.0.0'], { 'git-dep@1.0.0': 'git+https://github.com/example/git-dep.git' }) })
+    fake.configText = [
+      'checks:',
+      '  scope: false',
+      '  test-evidence: false',
+      '  review-packet: false',
+      '  claims: false',
+    ].join('\n')
+    const seen: string[] = []
+    const actions = io()
+    await expect(run({
+      io: actions,
+      input: input({ failOn: 'error' }),
+      createClient: () => fake.client(),
+      lookupProvenance: {
+        lookup: async (pkg) => {
+          seen.push(`${pkg.name}@${pkg.version}`)
+          if (pkg.name === 'fresh') return { state: 'present', detail: { code: 'npm_provenance' } }
+          throw new Error('registry down')
+        },
+      },
+      now: () => new Date('2026-10-27T00:00:00.000Z'),
+    })).resolves.toMatchObject({ commentUrl: 'https://example.test/comment/10' })
+    expect(actions.outputs['lockfile-provenance-status']).toBe('pass')
+    expect(actions.outputs['scope-status']).toBe('skipped')
+    expect(seen).toEqual(['fresh@2.0.0'])
+    expect(fake.comments[0]?.body).toContain('fresh@\u200b2.0.0')
+    expect(fake.comments[0]?.body).toContain('npm registry provenance')
+    expect(fake.comments[0]?.body).toContain('git-dep@\u200b1.0.0')
+    expect(fake.comments[0]?.body).toContain('not a package from these public registries')
+    expect(fake.comments[0]?.body).not.toContain('left-pad@1.3.0')
+    expect(actions.warnings).toEqual([])
+
+    const unreadable = new FakeClient()
+    unreadable.files = [{ filename: 'Cargo.lock', status: 'modified', additions: 4, deletions: 0 }]
+    unreadable.repoFiles.set(`${SHA}\nCargo.lock`, { text: '[[package]]\nname = "app"\nversion = "0.1.0"\n' })
+    unreadable.repoFiles.set(`${base}\nCargo.lock`, { text: null, error: 'blob too large' })
+    unreadable.configText = fake.configText
+    const again = io()
+    await expect(run({
+      io: again,
+      input: input({ failOn: 'warning' }),
+      createClient: () => unreadable.client(),
+      lookupProvenance: { lookup: async () => { throw new Error('should not be called') } },
+      now: () => new Date('2026-10-27T00:00:00.000Z'),
+    })).resolves.toMatchObject({ commentUrl: 'https://example.test/comment/10' })
+    expect(again.outputs['lockfile-provenance-status']).toBe('pass')
+    expect(unreadable.comments[0]?.body).toContain('lockfile_provenance.unreadable')
+    expect(unreadable.comments[0]?.body).toContain('blob too large')
+
+    const throwing = new FakeClient()
+    throwing.files = [{ filename: 'go.sum', status: 'added', additions: 1, deletions: 0 }]
+    throwing.configText = fake.configText
+    const client = throwing.client()
+    client.getRepoFile = async (path) => {
+      if (path.includes('pr-evidence')) return { text: throwing.configText }
+      throw new Error('connection reset')
+    }
+    const dropped = io()
+    await expect(run({
+      io: dropped,
+      input: input({ failOn: 'error' }),
+      createClient: () => client,
+      lookupProvenance: { lookup: async () => { throw new Error('should not be called') } },
+      now: () => new Date('2026-10-27T00:00:00.000Z'),
+    })).resolves.toMatchObject({ commentUrl: 'https://example.test/comment/10' })
+    expect(dropped.outputs['lockfile-provenance-status']).toBe('pass')
+    expect(throwing.comments[0]?.body).toContain('connection reset')
+  })
 })
+
+function npmLock(specs: string[], resolved: Record<string, string> = {}): string {
+  const packages: Record<string, { version: string; resolved?: string }> = { '': { version: '1.0.0' } }
+  for (const spec of specs) {
+    const at = spec.lastIndexOf('@')
+    const name = spec.slice(0, at)
+    const version = spec.slice(at + 1)
+    const entry: { version: string; resolved?: string } = { version }
+    const url = resolved[spec]
+    if (url) entry.resolved = url
+    packages[`node_modules/${name}`] = entry
+  }
+  return JSON.stringify({ lockfileVersion: 3, packages })
+}

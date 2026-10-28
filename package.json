@@ -2,7 +2,7 @@
   "name": "pr-evidence-check",
   "version": "0.1.0",
   "private": true,
-  "description": "GitHub Action: linked-issue scope, existing CI test evidence, a review packet, and deterministic claim checks. Comment only. No LLM.",
+  "description": "GitHub Action: linked-issue scope, existing CI test evidence, a review packet, deterministic claim checks, and a report-only lockfile provenance section. Comment only. No LLM.",
   "license": "MIT",
   "engines": {
     "node": ">=20"

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { DEFAULT_CLAIM_PATTERNS } from '../src/claims/defaults'
 import { parseClaims } from '../src/claims/parse'
 import { claimStatus, confirmedIssue, skippedClaims, verifyClaims, type ResolvedIssue } from '../src/claims/verify'
+import { emptyProvenance } from '../src/provenance/analyze'
 import { defaultConfig, loadConfig } from '../src/config'
 import { buildEvidence } from '../src/evidence/select'
 import { renderComment } from '../src/render'
@@ -421,6 +422,7 @@ describe('claim comment', () => {
       evidence: buildEvidence({ sha: 'a'.repeat(40), items: [], config: config.testEvidence, consideredJobs: 0, consideredChecks: 0 }),
       packet: analyzePacket('', config.reviewPacket),
       claims: { enabled: true, status: 'warn', scannedCommits: true, results, omitted: 2 },
+      provenance: emptyProvenance(),
     })
     const english = renderComment(report('en'), 'acme/app')
     const chinese = renderComment(report('zh'), 'acme/app')

@@ -82,6 +82,11 @@ export interface ClaimsConfig {
   testPaths: string[]
 }
 
+export interface LockfileProvenanceConfig {
+  /** Public-registry lookups for newly added packages. Further packages stay unknown. */
+  maxLookups: number
+}
+
 export interface Config {
   language: Language
   checks: {
@@ -89,11 +94,13 @@ export interface Config {
     testEvidence: boolean
     reviewPacket: boolean
     claims: boolean
+    lockfileProvenance: boolean
   }
   scope: ScopeConfig
   testEvidence: TestEvidenceConfig
   reviewPacket: ReviewPacketConfig
   claims: ClaimsConfig
+  lockfileProvenance: LockfileProvenanceConfig
 }
 
 export interface ChangedFile {
@@ -393,6 +400,53 @@ export interface ClaimReport {
   omitted: number
 }
 
+export type Ecosystem = 'npm' | 'pypi' | 'crates' | 'go'
+
+export type ProvenanceDetail =
+  | { code: 'npm_provenance' }
+  | { code: 'npm_attestation' }
+  | { code: 'pypi_provenance' }
+  | { code: 'crates_trustpub'; repository: string }
+  | { code: 'go_origin'; url: string }
+  | { code: 'no_attestation' }
+  | { code: 'not_found' }
+  | { code: 'lookup_failed' }
+  | { code: 'not_queried' }
+  | { code: 'not_registry' }
+
+export interface ProvenancePackageReport {
+  lockfile: string
+  ecosystem: Ecosystem
+  name: string
+  version: string
+  state: 'present' | 'unknown'
+  detail: ProvenanceDetail
+}
+
+export interface ProvenanceLockfile {
+  path: string
+  added: number
+  error?: string
+}
+
+export type ProvenanceSignal =
+  | { id: 'lockfile_provenance.none' }
+  | { id: 'lockfile_provenance.no_additions'; lockfiles: string[] }
+  | { id: 'lockfile_provenance.unreadable'; lockfile: string; message: string }
+  | { id: 'lockfile_provenance.lookup_failed'; count: number }
+  | { id: 'lockfile_provenance.capped'; cap: number }
+  | { id: 'lockfile_provenance.files_unreadable'; message: string }
+
+export interface ProvenanceReport {
+  enabled: boolean
+  /** pass when the check ran. skipped when disabled. Never warn or error: fail-on does not read it. */
+  status: CheckStatus
+  packages: ProvenancePackageReport[]
+  lockfiles: ProvenanceLockfile[]
+  omitted: number
+  signals: ProvenanceSignal[]
+}
+
 export interface Report {
   language: Language
   failOn: FailOn
@@ -402,4 +456,5 @@ export interface Report {
   evidence: EvidenceReport
   packet: PacketReport
   claims: ClaimReport
+  provenance: ProvenanceReport
 }

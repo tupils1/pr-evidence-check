@@ -34561,7 +34561,7 @@ function defaultHeadings() {
 function defaultConfig() {
     return {
         language: 'en',
-        checks: { scope: true, testEvidence: true, reviewPacket: true, claims: true },
+        checks: { scope: true, testEvidence: true, reviewPacket: true, claims: true, lockfileProvenance: true },
         scope: {
             largeDiffLines: 400,
             largeDiffFiles: 20,
@@ -34599,6 +34599,9 @@ function defaultConfig() {
             breakingNamePatterns: [...defaults_1.DEFAULT_BREAKING_PATTERNS],
             testPaths: [...defaults_1.DEFAULT_TEST_PATHS],
         },
+        lockfileProvenance: {
+            maxLookups: 30,
+        },
     };
 }
 function loadConfig(text, fileLabel, warn = () => undefined) {
@@ -34618,14 +34621,14 @@ function loadConfig(text, fileLabel, warn = () => undefined) {
         throw new errors_1.ActionFailure('misconfigured', `${fileLabel} must be a YAML mapping.`);
     }
     const config = defaultConfig();
-    warnUnknown(raw, ['language', 'checks', 'scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims'], fileLabel, warn);
+    warnUnknown(raw, ['language', 'checks', 'scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims', 'lockfile-provenance', 'lockfileProvenance'], fileLabel, warn);
     if ('language' in raw)
         config.language = expectLanguage(raw.language, 'language');
     const checks = pick(raw, 'checks');
     if (checks !== undefined) {
         if (!isRecord(checks))
             throw new errors_1.ActionFailure('misconfigured', 'checks must be a mapping.');
-        warnUnknown(checks, ['scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims'], 'checks', warn);
+        warnUnknown(checks, ['scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims', 'lockfile-provenance', 'lockfileProvenance'], 'checks', warn);
         if ('scope' in checks)
             config.checks.scope = expectBoolean(checks.scope, 'checks.scope');
         const testFlag = firstDefined(checks, 'test-evidence', 'testEvidence');
@@ -34636,6 +34639,10 @@ function loadConfig(text, fileLabel, warn = () => undefined) {
             config.checks.reviewPacket = expectBoolean(packetFlag, 'checks.review-packet');
         if ('claims' in checks)
             config.checks.claims = expectBoolean(checks.claims, 'checks.claims');
+        const provenanceFlag = firstDefined(checks, 'lockfile-provenance', 'lockfileProvenance');
+        if (provenanceFlag !== undefined) {
+            config.checks.lockfileProvenance = expectBoolean(provenanceFlag, 'checks.lockfile-provenance');
+        }
     }
     const scope = pick(raw, 'scope');
     if (scope !== undefined)
@@ -34648,6 +34655,9 @@ function loadConfig(text, fileLabel, warn = () => undefined) {
         applyPacket(config, packet, warn);
     if ('claims' in raw)
         applyClaims(config, raw.claims, warn);
+    const provenance = firstDefined(raw, 'lockfile-provenance', 'lockfileProvenance');
+    if (provenance !== undefined)
+        applyProvenance(config, provenance, warn);
     validatePatterns(config);
     return config;
 }
@@ -34893,6 +34903,15 @@ function applyClaims(config, value, warn) {
     const paths = firstDefined(value, 'test-paths', 'testPaths');
     if (paths !== undefined)
         config.claims.testPaths = expectPatternList('claims.test-paths', paths);
+}
+function applyProvenance(config, value, warn) {
+    if (!isRecord(value))
+        throw new errors_1.ActionFailure('misconfigured', 'lockfile-provenance must be a mapping.');
+    warnUnknown(value, ['max-lookups', 'maxLookups'], 'lockfile-provenance', warn);
+    const maxLookups = firstDefined(value, 'max-lookups', 'maxLookups');
+    if (maxLookups !== undefined) {
+        config.lockfileProvenance.maxLookups = expectNonNegative('lockfile-provenance.max-lookups', maxLookups);
+    }
 }
 const CLAIM_EVIDENCE = ['tests', 'lint', 'build', 'breaking', 'test_files', 'linked_issue'];
 function expectClaimPatterns(value) {
@@ -35562,23 +35581,36 @@ function createGitHubClient(options) {
         },
         async getRepoFile(path, ref) {
             const clean = path.replace(/^\/+/, '');
-            const response = await transport.request('GET /repos/{owner}/{repo}/contents/{path}', {
-                owner,
-                repo,
-                path: clean,
-                ref,
-            });
+            const params = { owner, repo, path: clean, ref };
+            const response = await transport.request('GET /repos/{owner}/{repo}/contents/{path}', params);
             if (response.status === 404)
                 return { text: null };
+            if (response.status >= 200 && response.status < 300) {
+                const decoded = decodeGitHubContent(response.data);
+                if (decoded != null)
+                    return { text: decoded };
+            }
+            // The contents JSON API refuses blobs over 1 MB. The raw media type, or a
+            // parsed JSON body, still carries lockfiles that the provenance check reads.
+            const raw = await transport.request('GET /repos/{owner}/{repo}/contents/{path}', {
+                ...params,
+                headers: { accept: 'application/vnd.github.raw' },
+            });
+            if (raw.status === 404)
+                return { text: null };
+            if (raw.status >= 200 && raw.status < 300) {
+                const decoded = decodeGitHubContent(raw.data);
+                if (decoded != null)
+                    return { text: decoded };
+                if ((0, text_1.asRecord)(raw.data) && !isGitHubErrorBody(raw.data)) {
+                    return { text: JSON.stringify(raw.data) };
+                }
+                return { text: null, error: 'response did not include file content' };
+            }
             if (response.status < 200 || response.status >= 300) {
                 return { text: null, error: httpMessage(response.status, response.data) };
             }
-            const record = (0, text_1.asRecord)(response.data);
-            const content = (0, text_1.asString)(record?.content);
-            if (!content || record?.encoding !== 'base64') {
-                return { text: null, error: 'config response did not include base64 file content' };
-            }
-            return { text: Buffer.from(content.replace(/\n/g, ''), 'base64').toString('utf8') };
+            return { text: null, error: 'response did not include file content' };
         },
         async listFiles(number) {
             const rows = await paginate(transport, 'GET /repos/{owner}/{repo}/pulls/{pull_number}/files', {
@@ -35862,6 +35894,18 @@ function splitRepo(repo, fallbackOwner, fallbackName) {
     if (owner && name)
         return [owner, name];
     return [fallbackOwner, fallbackName];
+}
+function decodeGitHubContent(data) {
+    if (typeof data === 'string')
+        return data;
+    const record = (0, text_1.asRecord)(data);
+    if (!record || typeof record.content !== 'string' || record.encoding !== 'base64')
+        return null;
+    return Buffer.from(record.content.replace(/\n/g, ''), 'base64').toString('utf8');
+}
+function isGitHubErrorBody(data) {
+    const record = (0, text_1.asRecord)(data);
+    return Boolean(record && typeof record.message === 'string' && typeof record.documentation_url === 'string');
 }
 function httpMessage(status, data) {
     const record = (0, text_1.asRecord)(data);
@@ -36170,6 +36214,832 @@ function rank(status) {
 
 /***/ }),
 
+/***/ 5239:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.emptyProvenance = emptyProvenance;
+exports.skippedProvenance = skippedProvenance;
+exports.filesUnavailableProvenance = filesUnavailableProvenance;
+exports.analyzeLockfiles = analyzeLockfiles;
+const parse_1 = __nccwpck_require__(1784);
+const DISPLAY_LIMIT = 40;
+const LOOKUP_CONCURRENCY = 4;
+function emptyProvenance() {
+    return {
+        enabled: true,
+        status: 'pass',
+        packages: [],
+        lockfiles: [],
+        omitted: 0,
+        signals: [{ id: 'lockfile_provenance.none' }],
+    };
+}
+function skippedProvenance() {
+    return {
+        enabled: false,
+        status: 'skipped',
+        packages: [],
+        lockfiles: [],
+        omitted: 0,
+        signals: [],
+    };
+}
+function filesUnavailableProvenance(message) {
+    return {
+        enabled: true,
+        status: 'pass',
+        packages: [],
+        lockfiles: [],
+        omitted: 0,
+        signals: [{ id: 'lockfile_provenance.files_unreadable', message }],
+    };
+}
+async function analyzeLockfiles(options) {
+    const sources = options.files.flatMap((file) => {
+        const kind = (0, parse_1.lockfileKind)(file.filename);
+        if (!kind || file.status === 'removed')
+            return [];
+        return [{ file, kind }];
+    });
+    if (sources.length === 0) {
+        return {
+            enabled: true,
+            status: 'pass',
+            packages: [],
+            lockfiles: [],
+            omitted: 0,
+            signals: [{ id: 'lockfile_provenance.none' }],
+        };
+    }
+    const lockfiles = [];
+    const pending = [];
+    for (const source of sources) {
+        const head = await options.read(source.file.filename, 'head');
+        if (head.error || head.text == null) {
+            const message = head.error ?? 'head copy was not readable';
+            lockfiles.push({ path: source.file.filename, added: 0, error: message });
+            continue;
+        }
+        const headParsed = (0, parse_1.parseLockfile)(source.kind, head.text);
+        if (headParsed.error) {
+            lockfiles.push({ path: source.file.filename, added: 0, error: headParsed.error });
+            continue;
+        }
+        const basePath = source.file.previousFilename ?? source.file.filename;
+        const addedFile = (source.file.status === 'added' || source.file.status === 'copied') && !source.file.previousFilename;
+        let before = [];
+        if (!addedFile) {
+            const base = await options.read(basePath, 'base');
+            if (base.error || base.text == null) {
+                const message = base.error ?? 'base copy was missing, so added packages were not compared';
+                lockfiles.push({ path: source.file.filename, added: 0, error: message });
+                continue;
+            }
+            const baseParsed = (0, parse_1.parseLockfile)(source.kind, base.text);
+            if (baseParsed.error) {
+                lockfiles.push({ path: source.file.filename, added: 0, error: baseParsed.error });
+                continue;
+            }
+            before = baseParsed.packages;
+        }
+        const added = (0, parse_1.addedPackages)(before, headParsed.packages);
+        lockfiles.push({ path: source.file.filename, added: added.length });
+        for (const pkg of added)
+            pending.push({ lockfile: source.file.filename, pkg });
+    }
+    pending.sort((a, b) => (a.lockfile.localeCompare(b.lockfile)
+        || a.pkg.name.localeCompare(b.pkg.name)
+        || a.pkg.version.localeCompare(b.pkg.version)
+        || (0, parse_1.packageIdentity)(a.pkg).localeCompare((0, parse_1.packageIdentity)(b.pkg))));
+    const cap = Math.max(0, options.maxLookups);
+    let budget = cap;
+    const planned = pending.map((item) => {
+        if (!item.pkg.registry)
+            return 'local';
+        if (budget <= 0)
+            return 'capped';
+        budget -= 1;
+        return 'query';
+    });
+    const lookedUp = await mapPool(pending, LOOKUP_CONCURRENCY, async (item, index) => {
+        const plan = planned[index];
+        if (plan === 'local') {
+            return packageRow(item, 'unknown', { code: 'not_registry' });
+        }
+        if (plan !== 'query') {
+            return packageRow(item, 'unknown', { code: 'not_queried' });
+        }
+        try {
+            const hit = await options.lookup.lookup(item.pkg);
+            return packageRow(item, hit.state, hit.detail);
+        }
+        catch {
+            return packageRow(item, 'unknown', { code: 'lookup_failed' });
+        }
+    });
+    const signals = [];
+    for (const lockfile of lockfiles) {
+        if (lockfile.error)
+            signals.push({ id: 'lockfile_provenance.unreadable', lockfile: lockfile.path, message: lockfile.error });
+    }
+    const readable = lockfiles.filter((lockfile) => !lockfile.error);
+    if (readable.length > 0 && readable.every((lockfile) => lockfile.added === 0) && lockfiles.every((lockfile) => !lockfile.error)) {
+        signals.push({ id: 'lockfile_provenance.no_additions', lockfiles: readable.map((lockfile) => lockfile.path) });
+    }
+    const failed = lookedUp.filter((pkg) => pkg.detail.code === 'lookup_failed').length;
+    if (failed > 0)
+        signals.push({ id: 'lockfile_provenance.lookup_failed', count: failed });
+    if (lookedUp.some((pkg) => pkg.detail.code === 'not_queried')) {
+        signals.push({ id: 'lockfile_provenance.capped', cap });
+    }
+    const shown = lookedUp.slice(0, DISPLAY_LIMIT);
+    return {
+        enabled: true,
+        status: 'pass',
+        packages: shown,
+        lockfiles,
+        omitted: Math.max(0, lookedUp.length - shown.length),
+        signals,
+    };
+}
+function packageRow(item, state, detail) {
+    return {
+        lockfile: item.lockfile,
+        ecosystem: item.pkg.ecosystem,
+        name: item.pkg.name,
+        version: item.pkg.version,
+        state,
+        detail,
+    };
+}
+async function mapPool(items, limit, fn) {
+    const results = new Array(items.length);
+    let next = 0;
+    const workers = Math.max(1, Math.min(limit, items.length || 1));
+    async function worker() {
+        while (next < items.length) {
+            const index = next;
+            next += 1;
+            const item = items[index];
+            if (item === undefined)
+                continue;
+            results[index] = await fn(item, index);
+        }
+    }
+    if (items.length === 0)
+        return results;
+    await Promise.all(Array.from({ length: workers }, () => worker()));
+    return results;
+}
+
+
+/***/ }),
+
+/***/ 8689:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.createRegistryProvenanceClient = createRegistryProvenanceClient;
+exports.goInfoUrl = goInfoUrl;
+const text_1 = __nccwpck_require__(8992);
+const parse_1 = __nccwpck_require__(1784);
+const USER_AGENT = 'pr-evidence-check';
+const DEFAULT_TIMEOUT_MS = 5_000;
+const PRESENT = (detail) => ({ state: 'present', detail });
+const UNKNOWN = (detail) => ({ state: 'unknown', detail });
+const NOT_FOUND = UNKNOWN({ code: 'not_found' });
+const NO_ATTESTATION = UNKNOWN({ code: 'no_attestation' });
+const LOOKUP_FAILED = UNKNOWN({ code: 'lookup_failed' });
+function createRegistryProvenanceClient(options) {
+    const fetchImpl = options?.fetchImpl ?? globalThis.fetch;
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    return {
+        async lookup(pkg) {
+            if (!pkg.registry)
+                return UNKNOWN({ code: 'not_registry' });
+            try {
+                switch (pkg.ecosystem) {
+                    case 'npm':
+                        return await lookupNpm(fetchImpl, timeoutMs, pkg);
+                    case 'pypi':
+                        return await lookupPypi(fetchImpl, timeoutMs, pkg);
+                    case 'crates':
+                        return await lookupCrates(fetchImpl, timeoutMs, pkg);
+                    case 'go':
+                        return await lookupGo(fetchImpl, timeoutMs, pkg);
+                }
+            }
+            catch {
+                return LOOKUP_FAILED;
+            }
+        },
+    };
+}
+async function lookupNpm(fetchImpl, timeoutMs, pkg) {
+    const name = pkg.name.startsWith('@')
+        ? `@${encodeURIComponent(pkg.name.slice(1))}`
+        : encodeURIComponent(pkg.name);
+    const response = await requestJson(fetchImpl, `https://registry.npmjs.org/${name}/${encodeURIComponent(pkg.version)}`, timeoutMs, 'application/json');
+    if (response.kind === 'fail')
+        return LOOKUP_FAILED;
+    if (response.status === 404)
+        return NOT_FOUND;
+    if (response.status !== 200)
+        return LOOKUP_FAILED;
+    const attestations = (0, text_1.asRecord)((0, text_1.asRecord)((0, text_1.asRecord)(response.body)?.dist)?.attestations);
+    if (!attestations)
+        return NO_ATTESTATION;
+    if ((0, text_1.asRecord)(attestations.provenance))
+        return PRESENT({ code: 'npm_provenance' });
+    if ((0, text_1.asString)(attestations.url))
+        return PRESENT({ code: 'npm_attestation' });
+    return NO_ATTESTATION;
+}
+async function lookupPypi(fetchImpl, timeoutMs, pkg) {
+    const project = encodeURIComponent((0, parse_1.normalizePypiName)(pkg.name));
+    const version = encodeURIComponent(pkg.version);
+    let filename = pkg.filename;
+    if (!filename) {
+        const meta = await requestJson(fetchImpl, `https://pypi.org/pypi/${project}/${version}/json`, timeoutMs, 'application/json');
+        if (meta.kind === 'fail')
+            return LOOKUP_FAILED;
+        if (meta.status === 404)
+            return NOT_FOUND;
+        if (meta.status !== 200)
+            return LOOKUP_FAILED;
+        filename = pypiFilename(meta.body);
+        if (!filename)
+            return NO_ATTESTATION;
+    }
+    const file = encodeURIComponent(filename);
+    const provenance = await requestJson(fetchImpl, `https://pypi.org/integrity/${project}/${version}/${file}/provenance`, timeoutMs, 'application/vnd.pypi.integrity.v1+json, application/json;q=0.9');
+    if (provenance.kind === 'fail')
+        return LOOKUP_FAILED;
+    if (provenance.status === 404)
+        return NO_ATTESTATION;
+    if (provenance.status !== 200)
+        return LOOKUP_FAILED;
+    const bundles = (0, text_1.asRecord)(provenance.body)?.attestation_bundles;
+    if (Array.isArray(bundles) && bundles.length > 0)
+        return PRESENT({ code: 'pypi_provenance' });
+    return NO_ATTESTATION;
+}
+function pypiFilename(body) {
+    const urls = (0, text_1.asRecord)(body)?.urls;
+    if (!Array.isArray(urls))
+        return undefined;
+    const names = urls.flatMap((item) => {
+        const name = (0, text_1.asString)((0, text_1.asRecord)(item)?.filename);
+        return name ? [name] : [];
+    });
+    return names.find((name) => name.endsWith('.tar.gz')) ?? names.find((name) => name.endsWith('.whl')) ?? names[0];
+}
+async function lookupCrates(fetchImpl, timeoutMs, pkg) {
+    const response = await requestJson(fetchImpl, `https://crates.io/api/v1/crates/${encodeURIComponent(pkg.name)}/${encodeURIComponent(pkg.version)}`, timeoutMs, 'application/json');
+    if (response.kind === 'fail')
+        return LOOKUP_FAILED;
+    if (response.status === 404)
+        return NOT_FOUND;
+    if (response.status !== 200)
+        return LOOKUP_FAILED;
+    const repository = cratesRepository((0, text_1.asRecord)((0, text_1.asRecord)(response.body)?.version)?.trustpub_data);
+    if (!repository)
+        return NO_ATTESTATION;
+    return PRESENT({ code: 'crates_trustpub', repository });
+}
+function cratesRepository(value) {
+    const record = (0, text_1.asRecord)(value);
+    if (!record)
+        return null;
+    const sha = (0, text_1.asString)(record.sha);
+    const repository = (0, text_1.asString)(record.repository) ?? (0, text_1.asString)(record.project_path);
+    if (!sha || !repository)
+        return null;
+    return repository;
+}
+async function lookupGo(fetchImpl, timeoutMs, pkg) {
+    const response = await requestJson(fetchImpl, goInfoUrl(pkg.name, pkg.version), timeoutMs, 'application/json');
+    if (response.kind === 'fail')
+        return LOOKUP_FAILED;
+    if (response.status === 404)
+        return NOT_FOUND;
+    if (response.status !== 200)
+        return LOOKUP_FAILED;
+    const origin = (0, text_1.asRecord)((0, text_1.asRecord)(response.body)?.Origin);
+    const url = (0, text_1.asString)(origin?.URL);
+    const hash = (0, text_1.asString)(origin?.Hash);
+    if (!url || !hash)
+        return NO_ATTESTATION;
+    return PRESENT({ code: 'go_origin', url });
+}
+function goInfoUrl(moduleName, version) {
+    const path = moduleName.split('/').filter((part) => part.length > 0).map(escapeGoSegment).join('/');
+    return `https://proxy.golang.org/${path}/@v/${escapeGoSegment(version)}.info`;
+}
+function escapeGoSegment(segment) {
+    const escaped = segment.replace(/[A-Z]/g, (char) => `!${char.toLowerCase()}`);
+    return encodeURIComponent(escaped);
+}
+async function requestJson(fetchImpl, url, timeoutMs, accept) {
+    try {
+        const response = await fetchImpl(url, {
+            method: 'GET',
+            redirect: 'follow',
+            headers: {
+                accept,
+                'user-agent': USER_AGENT,
+            },
+            signal: AbortSignal.timeout(timeoutMs),
+        });
+        const text = await response.text();
+        let body = null;
+        if (text) {
+            try {
+                body = JSON.parse(text);
+            }
+            catch {
+                body = text;
+            }
+        }
+        return { kind: 'ok', status: response.status, body };
+    }
+    catch {
+        return { kind: 'fail' };
+    }
+}
+
+
+/***/ }),
+
+/***/ 1784:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.lockfileKind = lockfileKind;
+exports.parseLockfile = parseLockfile;
+exports.packageIdentity = packageIdentity;
+exports.addedPackages = addedPackages;
+exports.normalizePypiName = normalizePypiName;
+exports.splitPnpmKey = splitPnpmKey;
+const js_yaml_1 = __importDefault(__nccwpck_require__(4281));
+const text_1 = __nccwpck_require__(8992);
+const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const SEMVER_PREFIX = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?/;
+const NPM_PUBLIC_HOSTS = new Set([
+    'registry.npmjs.org',
+    'registry.yarnpkg.com',
+    'registry.npmmirror.com',
+    'registry.npm.taobao.org',
+]);
+function lockfileKind(filename) {
+    const base = filename.split('/').pop() ?? filename;
+    switch (base) {
+        case 'package-lock.json':
+            return 'npm';
+        case 'pnpm-lock.yaml':
+            return 'pnpm';
+        case 'yarn.lock':
+            return 'yarn';
+        case 'poetry.lock':
+            return 'poetry';
+        case 'Cargo.lock':
+            return 'cargo';
+        case 'go.sum':
+            return 'go';
+        default:
+            return null;
+    }
+}
+function parseLockfile(kind, text) {
+    try {
+        const packages = dedupe(parseKind(kind, text));
+        return { packages };
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { packages: [], error: message };
+    }
+}
+function packageIdentity(pkg) {
+    const name = pkg.ecosystem === 'pypi' ? normalizePypiName(pkg.name) : pkg.name;
+    return `${pkg.ecosystem}\0${name}\0${pkg.version}`;
+}
+function addedPackages(before, after) {
+    const seen = new Set(before.map(packageIdentity));
+    const added = [];
+    const emitted = new Set();
+    for (const pkg of after) {
+        const id = packageIdentity(pkg);
+        if (seen.has(id) || emitted.has(id))
+            continue;
+        emitted.add(id);
+        added.push(pkg);
+    }
+    return added;
+}
+function normalizePypiName(name) {
+    return name.toLowerCase().replace(/[_.]+/g, '-').replace(/-+/g, '-');
+}
+function parseKind(kind, text) {
+    switch (kind) {
+        case 'npm':
+            return parseNpmLock(text);
+        case 'pnpm':
+            return parsePnpmLock(text);
+        case 'yarn':
+            return parseYarnLock(text);
+        case 'poetry':
+            return parsePoetryLock(text);
+        case 'cargo':
+            return parseCargoLock(text);
+        case 'go':
+            return parseGoSum(text);
+    }
+}
+function parseNpmLock(text) {
+    const data = JSON.parse(text);
+    const record = (0, text_1.asRecord)(data);
+    if (!record)
+        throw new Error('package-lock.json is not an object');
+    if (record.packages && typeof record.packages === 'object')
+        return parseNpmPackages(record.packages);
+    if (record.dependencies && typeof record.dependencies === 'object')
+        return parseNpmDependencies(record.dependencies);
+    return [];
+}
+function parseNpmPackages(value) {
+    const out = [];
+    for (const [key, entry] of Object.entries(value)) {
+        if (!key)
+            continue;
+        const record = (0, text_1.asRecord)(entry);
+        if (!record || record.link === true)
+            continue;
+        const version = (0, text_1.asString)(record.version);
+        if (!version)
+            continue;
+        const name = (0, text_1.asString)(record.name) ?? nameFromNodeModules(key);
+        if (!name)
+            continue;
+        out.push(npmPackage(name, version, record.resolved));
+    }
+    return out;
+}
+function parseNpmDependencies(value) {
+    const out = [];
+    const walk = (node) => {
+        for (const [name, entry] of Object.entries(node)) {
+            const record = (0, text_1.asRecord)(entry);
+            if (!record)
+                continue;
+            const version = (0, text_1.asString)(record.version);
+            if (version)
+                out.push(npmPackage(name, version, record.resolved));
+            const nested = (0, text_1.asRecord)(record.dependencies);
+            if (nested)
+                walk(nested);
+        }
+    };
+    walk(value);
+    return out;
+}
+function npmPackage(name, version, resolved) {
+    return {
+        ecosystem: 'npm',
+        name,
+        version,
+        registry: npmRegistry(version, resolved),
+    };
+}
+function npmRegistry(version, resolved) {
+    if (!SEMVER.test(version))
+        return false;
+    if (typeof resolved !== 'string' || resolved.length === 0)
+        return true;
+    return npmHost(resolved);
+}
+function npmHost(url) {
+    if (url.startsWith('file:') || url.startsWith('link:') || url.startsWith('git+') || url.startsWith('github:')) {
+        return false;
+    }
+    try {
+        const host = new URL(url).host.toLowerCase();
+        return NPM_PUBLIC_HOSTS.has(host);
+    }
+    catch {
+        return false;
+    }
+}
+function nameFromNodeModules(key) {
+    const marker = 'node_modules/';
+    const index = key.lastIndexOf(marker);
+    if (index < 0)
+        return null;
+    const rest = key.slice(index + marker.length);
+    if (!rest)
+        return null;
+    if (rest.startsWith('@')) {
+        const [scope, name] = rest.split('/');
+        if (!scope || !name)
+            return null;
+        return `${scope}/${name}`;
+    }
+    const name = rest.split('/')[0];
+    return name || null;
+}
+function parsePnpmLock(text) {
+    const data = js_yaml_1.default.load(text);
+    const record = (0, text_1.asRecord)(data);
+    if (!record)
+        throw new Error('pnpm-lock.yaml is not a mapping');
+    const packages = (0, text_1.asRecord)(record.packages);
+    if (!packages)
+        return [];
+    const out = [];
+    for (const [key, entry] of Object.entries(packages)) {
+        const parsed = splitPnpmKey(key);
+        if (!parsed)
+            continue;
+        const resolution = (0, text_1.asRecord)((0, text_1.asRecord)(entry)?.resolution);
+        out.push({
+            ecosystem: 'npm',
+            name: parsed.name,
+            version: parsed.version,
+            registry: pnpmRegistry(parsed.version, resolution),
+        });
+    }
+    return out;
+}
+function splitPnpmKey(key) {
+    let raw = key.trim();
+    if (!raw)
+        return null;
+    if (raw.startsWith('/'))
+        raw = raw.slice(1);
+    const peer = raw.indexOf('(');
+    if (peer >= 0)
+        raw = raw.slice(0, peer);
+    const scoped = raw.startsWith('@');
+    let name = '';
+    let rest = '';
+    if (scoped) {
+        const slash = raw.indexOf('/');
+        if (slash < 0)
+            return null;
+        const after = raw.slice(slash + 1);
+        const at = after.indexOf('@');
+        const nested = after.indexOf('/');
+        if (at >= 0 && (nested < 0 || at < nested)) {
+            name = raw.slice(0, slash + 1 + at);
+            rest = after.slice(at + 1);
+        }
+        else if (nested >= 0) {
+            name = raw.slice(0, slash + 1 + nested);
+            rest = after.slice(nested + 1);
+        }
+        else {
+            return null;
+        }
+    }
+    else {
+        const at = raw.indexOf('@');
+        const slash = raw.indexOf('/');
+        if (at >= 0 && (slash < 0 || at < slash)) {
+            name = raw.slice(0, at);
+            rest = raw.slice(at + 1);
+        }
+        else if (slash >= 0) {
+            name = raw.slice(0, slash);
+            rest = raw.slice(slash + 1);
+        }
+        else {
+            return null;
+        }
+    }
+    const match = SEMVER_PREFIX.exec(rest);
+    if (!name || !match)
+        return null;
+    return { name, version: match[0] };
+}
+function pnpmRegistry(version, resolution) {
+    if (!SEMVER.test(version))
+        return false;
+    if (!resolution)
+        return true;
+    const type = (0, text_1.asString)(resolution.type);
+    if (type === 'git' || type === 'directory')
+        return false;
+    const tarball = (0, text_1.asString)(resolution.tarball);
+    if (!tarball)
+        return true;
+    return npmHost(tarball);
+}
+function parseYarnLock(text) {
+    const out = [];
+    let descriptors = [];
+    let version = '';
+    let resolved = '';
+    let resolution = '';
+    const flush = () => {
+        if (descriptors.length === 0)
+            return;
+        const name = yarnName(descriptors[0] ?? '');
+        if (name && version) {
+            out.push({
+                ecosystem: 'npm',
+                name,
+                version,
+                registry: yarnRegistry(version, resolution, resolved),
+            });
+        }
+        descriptors = [];
+        version = '';
+        resolved = '';
+        resolution = '';
+    };
+    for (const line of text.split('\n')) {
+        if (!line.trim() || line.startsWith('#'))
+            continue;
+        if (!/^\s/.test(line)) {
+            flush();
+            if (line.trim() === '__metadata:' || !line.includes('@'))
+                continue;
+            const header = line.replace(/:\s*$/, '');
+            descriptors = splitYarnDescriptors(header);
+            continue;
+        }
+        const versionMatch = /^\s+version:?\s+"?([^"\s]+)"?\s*$/.exec(line);
+        if (versionMatch?.[1])
+            version = versionMatch[1];
+        const resolvedMatch = /^\s+resolved:?\s+"?([^"\s]+)"?\s*$/.exec(line);
+        if (resolvedMatch?.[1])
+            resolved = resolvedMatch[1];
+        const resolutionMatch = /^\s+resolution:?\s+"?([^"\s]+)"?\s*$/.exec(line);
+        if (resolutionMatch?.[1])
+            resolution = resolutionMatch[1];
+    }
+    flush();
+    return out;
+}
+function splitYarnDescriptors(header) {
+    const parts = [];
+    let current = '';
+    let quote = false;
+    for (const char of header) {
+        if (char === '"') {
+            quote = !quote;
+            continue;
+        }
+        if (char === ',' && !quote) {
+            if (current.trim())
+                parts.push(current.trim());
+            current = '';
+            continue;
+        }
+        current += char;
+    }
+    if (current.trim())
+        parts.push(current.trim());
+    return parts;
+}
+function yarnName(descriptor) {
+    const match = /^(.*)@(?:npm|workspace|patch|portal|file|git|link|exec|github):/.exec(descriptor);
+    if (match?.[1])
+        return match[1];
+    const at = descriptor.lastIndexOf('@');
+    if (at <= 0)
+        return null;
+    return descriptor.slice(0, at);
+}
+function yarnRegistry(version, resolution, resolved) {
+    const protocol = /@(npm|workspace|patch|portal|file|git|link|exec|github):/.exec(resolution)?.[1];
+    if (protocol)
+        return protocol === 'npm' && SEMVER.test(version);
+    if (!SEMVER.test(version))
+        return false;
+    if (!resolved)
+        return true;
+    return npmHost(resolved);
+}
+function parsePoetryLock(text) {
+    const chunks = text.split(/\n(?=\[\[package\]\])/);
+    const out = [];
+    for (const chunk of chunks) {
+        if (!chunk.includes('[[package]]'))
+            continue;
+        const name = /^name\s*=\s*"([^"]+)"/m.exec(chunk)?.[1];
+        const version = /^version\s*=\s*"([^"]+)"/m.exec(chunk)?.[1];
+        if (!name || !version)
+            continue;
+        const source = /\[package\.source\][\s\S]*?(?=\n\[\[|\n\[package\.|\s*$)/.exec(chunk)?.[0] ?? '';
+        const sourceType = /^type\s*=\s*"([^"]+)"/m.exec(source)?.[1] ?? '';
+        const sourceUrl = /^url\s*=\s*"([^"]+)"/m.exec(source)?.[1] ?? '';
+        const files = [...chunk.matchAll(/\{\s*file\s*=\s*"([^"]+)"/g)].map((match) => match[1] ?? '').filter(Boolean);
+        const filename = files.find((file) => file.endsWith('.tar.gz'))
+            ?? files.find((file) => file.endsWith('.whl'))
+            ?? files[0];
+        out.push({
+            ecosystem: 'pypi',
+            name,
+            version,
+            registry: poetryRegistry(sourceType, sourceUrl),
+            ...(filename ? { filename } : {}),
+        });
+    }
+    return out;
+}
+function poetryRegistry(sourceType, sourceUrl) {
+    if (sourceType === 'git' || sourceType === 'directory' || sourceType === 'file' || sourceType === 'path') {
+        return false;
+    }
+    if (!sourceUrl)
+        return true;
+    try {
+        const host = new URL(sourceUrl).host.toLowerCase();
+        return host === 'pypi.org' || host === 'files.pythonhosted.org' || host === 'pypi.python.org';
+    }
+    catch {
+        return false;
+    }
+}
+function parseCargoLock(text) {
+    const chunks = text.split(/\n(?=\[\[package\]\])/);
+    const out = [];
+    for (const chunk of chunks) {
+        if (!chunk.includes('[[package]]'))
+            continue;
+        const name = /^name\s*=\s*"([^"]+)"/m.exec(chunk)?.[1];
+        const version = /^version\s*=\s*"([^"]+)"/m.exec(chunk)?.[1];
+        if (!name || !version)
+            continue;
+        const source = /^source\s*=\s*"([^"]+)"/m.exec(chunk)?.[1] ?? '';
+        out.push({
+            ecosystem: 'crates',
+            name,
+            version,
+            registry: cargoRegistry(source),
+        });
+    }
+    return out;
+}
+function cargoRegistry(source) {
+    if (!source)
+        return false;
+    if (source.startsWith('git+') || source.startsWith('path+'))
+        return false;
+    return source.startsWith('registry+https://github.com/rust-lang/crates.io-index')
+        || source.includes('index.crates.io');
+}
+function parseGoSum(text) {
+    const modules = new Map();
+    for (const line of text.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed)
+            continue;
+        const [name, rawVersion] = trimmed.split(/\s+/);
+        if (!name || !rawVersion)
+            continue;
+        const goMod = rawVersion.endsWith('/go.mod');
+        const version = goMod ? rawVersion.slice(0, -'/go.mod'.length) : rawVersion;
+        if (!version || version.includes('/'))
+            continue;
+        const id = `${name}\0${version}`;
+        if (modules.has(id) && goMod)
+            continue;
+        modules.set(id, { ecosystem: 'go', name, version, registry: true });
+    }
+    return [...modules.values()];
+}
+function dedupe(packages) {
+    const byId = new Map();
+    for (const pkg of packages) {
+        const id = packageIdentity(pkg);
+        const existing = byId.get(id);
+        if (!existing) {
+            byId.set(id, pkg);
+            continue;
+        }
+        if (!existing.registry && pkg.registry)
+            byId.set(id, { ...pkg, filename: pkg.filename ?? existing.filename });
+        else if (!existing.filename && pkg.filename)
+            byId.set(id, { ...existing, filename: pkg.filename });
+    }
+    return [...byId.values()];
+}
+
+
+/***/ }),
+
 /***/ 7055:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
@@ -36186,7 +37056,7 @@ const text_1 = __nccwpck_require__(8992);
 exports.MARKER = '<!-- pr-evidence-check -->';
 const FILE_LIMIT = 40;
 function renderComment(report, prRepo) {
-    const statusLine = `<!-- pr-evidence-check scope=${report.scope.status} test-evidence=${report.evidence.status} review-packet=${report.packet.status} claims=${report.claims.status} -->`;
+    const statusLine = `<!-- pr-evidence-check scope=${report.scope.status} test-evidence=${report.evidence.status} review-packet=${report.packet.status} claims=${report.claims.status} lockfile-provenance=${report.provenance.status} -->`;
     const body = renderBody(report, prRepo);
     return `${exports.MARKER}\n${statusLine}\n${body}`;
 }
@@ -36209,6 +37079,8 @@ function renderBody(report, prRepo) {
         '',
         renderClaims(report.claims, lang),
         '',
+        renderProvenance(report.provenance, lang),
+        '',
         footer(report, lang),
     ];
     return parts.join('\n');
@@ -36221,12 +37093,14 @@ function intro(report, lang) {
         return [
             '这是一条确定性的审查评论，只供维护者扫读。没有调用 LLM，也没有重新跑测试。',
             `下面的测试证据只来自 head SHA \`${(0, text_1.shortSha)(report.headSha)}\` 上**已经存在**的 check run 和 Actions job。`,
+            '锁文件有改动时，来源证明只把包名和版本发给公共仓库。',
             `默认不阻断合并（\`fail-on: ${report.failOn}\`）。`,
         ].join('');
     }
     return [
         'Deterministic review notes for maintainers. No LLM was called, and tests were not re-run.',
         ` Test evidence is whatever CI already recorded for head SHA \`${(0, text_1.shortSha)(report.headSha)}\`.`,
+        ' Lockfile provenance, when a lockfile changed, sends only the package name and version to a public registry.',
         ` This does not block merges (\`fail-on: ${report.failOn}\`).`,
     ].join('');
 }
@@ -36237,6 +37111,7 @@ function statusTable(report, lang) {
         [lang === 'zh' ? '测试证据（已有 CI）' : 'Test evidence (existing CI)', statusWord(report.evidence.status, lang)],
         [lang === 'zh' ? '审查材料包' : 'Review packet', statusWord(report.packet.status, lang)],
         [lang === 'zh' ? '声明核验' : 'Claim verification', statusWord(report.claims.status, lang)],
+        [lang === 'zh' ? '锁文件来源证明' : 'Lockfile provenance', statusWord(report.provenance.status, lang)],
     ];
     return markdownTable(headers, rows.map((row) => row.map((value) => `**${value}**`)));
 }
@@ -36369,6 +37244,100 @@ function renderClaims(claims, lang) {
         ? '相矛盾的声明默认是警告。除非 workflow 把 `fail-on` 设成 `warning` 或 `error`，否则不会因此让 job 失败。'
         : 'Contradicted claims are warnings by default. They do not fail the job unless `fail-on` is `warning` or `error`.');
     return lines.join('\n');
+}
+function renderProvenance(provenance, lang) {
+    const title = lang === 'zh' ? '### 锁文件来源证明' : '### Lockfile provenance';
+    if (!provenance.enabled) {
+        return `${title} · ${statusWord('skipped', lang)}\n\n${lang === 'zh' ? '已在配置中关闭。' : 'Disabled in config.'}`;
+    }
+    const lines = [`${title} · ${statusWord(provenance.status, lang)}`, ''];
+    lines.push(lang === 'zh'
+        ? '只在 PR 改了 `package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`poetry.lock`、`Cargo.lock` 或 `go.sum` 时，列出新增的包。`present` 表示公共仓库的 API 返回了来源证明或 sigstore attestation。查不到、没有这种记录，或网络失败，都标 `unknown`。这一节只报告，`fail-on` 不会读它，也不拦截合并。'
+        : 'When the pull request changes `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `Cargo.lock`, or `go.sum`, this lists package versions that were not in the base file. `present` means a public registry API returned provenance or a sigstore attestation. Anything missing, unpublished, or unreachable stays `unknown`. This section only reports. `fail-on` does not read it, and it does not block merges.');
+    if (provenance.signals.length > 0) {
+        lines.push('', lang === 'zh' ? '**信号**' : '**Signals**', '');
+        for (const signal of provenance.signals)
+            lines.push(`- ${renderProvenanceSignal(signal, lang)}`);
+    }
+    if (provenance.packages.length > 0) {
+        lines.push('', lang === 'zh' ? '**新增的包**' : '**Added packages**', '');
+        if (provenance.omitted > 0) {
+            lines.push(lang === 'zh'
+                ? `只列出 ${provenance.packages.length} 个，另有 ${provenance.omitted} 个未列出。`
+                : `Showing ${provenance.packages.length} added packages. ${provenance.omitted} more were omitted.`);
+            lines.push('');
+        }
+        const headers = lang === 'zh' ? ['锁文件', '包', '来源证明'] : ['Lockfile', 'Package', 'Provenance'];
+        const rows = provenance.packages.map((pkg) => [
+            `\`${(0, text_1.cell)(pkg.lockfile)}\``,
+            `\`${(0, text_1.cell)(`${pkg.name}@${pkg.version}`)}\``,
+            provenanceCell(pkg.state, pkg.detail, lang),
+        ]);
+        lines.push(markdownTable(headers, rows));
+    }
+    return lines.join('\n');
+}
+function renderProvenanceSignal(signal, lang) {
+    switch (signal.id) {
+        case 'lockfile_provenance.none':
+            return lang === 'zh'
+                ? '`lockfile_provenance.none` — 没有改这些锁文件。'
+                : '`lockfile_provenance.none` — None of those lockfiles changed.';
+        case 'lockfile_provenance.no_additions':
+            return lang === 'zh'
+                ? `\`lockfile_provenance.no_additions\` — 这些锁文件有改动，但没有新增的包版本：${codeList(signal.lockfiles)}。`
+                : `\`lockfile_provenance.no_additions\` — These lockfiles changed and every package version was already present: ${codeList(signal.lockfiles)}.`;
+        case 'lockfile_provenance.unreadable':
+            return lang === 'zh'
+                ? `\`lockfile_provenance.unreadable\` — 读不到 \`${(0, text_1.cell)(signal.lockfile)}\`，所以没有列出它新增的包：${(0, text_1.cell)(signal.message)}`
+                : `\`lockfile_provenance.unreadable\` — Could not read \`${(0, text_1.cell)(signal.lockfile)}\`, so its added packages were not listed: ${(0, text_1.cell)(signal.message)}`;
+        case 'lockfile_provenance.lookup_failed':
+            return lang === 'zh'
+                ? `\`lockfile_provenance.lookup_failed\` — ${signal.count} 个包在查询公共仓库时失败，已标 unknown。`
+                : `\`lockfile_provenance.lookup_failed\` — ${signal.count} registry ${signal.count === 1 ? 'lookup' : 'lookups'} failed and ${signal.count === 1 ? 'that package is' : 'those packages are'} unknown.`;
+        case 'lockfile_provenance.capped':
+            return lang === 'zh'
+                ? `\`lockfile_provenance.capped\` — 公共仓库查询在 ${signal.cap} 个包后停止。其余新增的包标 unknown，没有继续请求。`
+                : `\`lockfile_provenance.capped\` — Public registry lookups stopped after ${signal.cap} packages. Further added packages are unknown and were not requested.`;
+        case 'lockfile_provenance.files_unreadable':
+            return lang === 'zh'
+                ? `\`lockfile_provenance.files_unreadable\` — 读不到 PR 文件列表，无法比较锁文件：${(0, text_1.cell)(signal.message)}`
+                : `\`lockfile_provenance.files_unreadable\` — The pull request file list could not be read, so lockfiles were not compared: ${(0, text_1.cell)(signal.message)}`;
+    }
+}
+function provenanceCell(state, detail, lang) {
+    const word = state === 'present'
+        ? (lang === 'zh' ? '有来源证明' : 'present')
+        : 'unknown';
+    return `${word} · ${provenanceDetail(detail, lang)}`;
+}
+function provenanceDetail(detail, lang) {
+    switch (detail.code) {
+        case 'npm_provenance':
+            return lang === 'zh' ? 'npm registry 的 provenance' : 'npm registry provenance';
+        case 'npm_attestation':
+            return lang === 'zh' ? 'npm registry 的 sigstore attestation' : 'npm registry sigstore attestation';
+        case 'pypi_provenance':
+            return lang === 'zh' ? 'PyPI integrity provenance' : 'PyPI integrity provenance';
+        case 'crates_trustpub':
+            return lang === 'zh'
+                ? `crates.io 可信发布者 \`${(0, text_1.cell)(detail.repository)}\``
+                : `crates.io trusted publisher \`${(0, text_1.cell)(detail.repository)}\``;
+        case 'go_origin':
+            return lang === 'zh'
+                ? `模块代理记录的来源 \`${(0, text_1.cell)(detail.url)}\``
+                : `module proxy origin \`${(0, text_1.cell)(detail.url)}\``;
+        case 'no_attestation':
+            return lang === 'zh' ? '仓库响应里没有来源证明' : 'no provenance attestation in the registry response';
+        case 'not_found':
+            return lang === 'zh' ? '公共仓库里没有这个版本' : 'version was not found on the public registry';
+        case 'lookup_failed':
+            return lang === 'zh' ? '查询仓库失败' : 'registry lookup failed';
+        case 'not_queried':
+            return lang === 'zh' ? '达到查询上限，未请求' : 'not queried because the lookup cap was reached';
+        case 'not_registry':
+            return lang === 'zh' ? '不是这些公共仓库里的包' : 'not a package from these public registries';
+    }
 }
 function claimWhere(claim, lang) {
     if (claim.source === 'commit') {
@@ -36836,8 +37805,10 @@ const context_1 = __nccwpck_require__(788);
 const errors_1 = __nccwpck_require__(3916);
 const select_1 = __nccwpck_require__(669);
 const analyze_1 = __nccwpck_require__(2592);
+const analyze_2 = __nccwpck_require__(5239);
+const lookup_1 = __nccwpck_require__(8689);
 const render_1 = __nccwpck_require__(7055);
-const analyze_2 = __nccwpck_require__(8204);
+const analyze_3 = __nccwpck_require__(8204);
 const links_1 = __nccwpck_require__(3189);
 const sticky_1 = __nccwpck_require__(6230);
 const text_1 = __nccwpck_require__(8992);
@@ -36874,12 +37845,12 @@ async function run(deps) {
         deps.io.warning(message);
     });
     const language = (0, config_1.parseLanguage)(deps.input.commentLanguage) ?? config.language;
-    const needFiles = config.checks.scope || config.checks.claims;
+    const needFiles = config.checks.scope || config.checks.claims || config.checks.lockfileProvenance;
     const needIssues = config.checks.scope || config.checks.claims;
     const fileResult = needFiles ? await loadFiles(client, pr.number) : undefined;
     const issueResult = needIssues ? await loadLinkedIssues(client, pr, context.number, config, prRepo) : undefined;
     const scope = config.checks.scope
-        ? (0, analyze_2.analyzeScope)({
+        ? (0, analyze_3.analyzeScope)({
             prRepo,
             files: fileResult?.files ?? [],
             issues: issueResult?.issues ?? [],
@@ -36890,7 +37861,7 @@ async function run(deps) {
             ...(fileResult?.error || issueResult?.error ? { apiError: fileResult?.error ?? issueResult?.error } : {}),
             ...(fileResult?.error ? { filesUnavailable: true } : {}),
         })
-        : (0, analyze_2.skippedScope)();
+        : (0, analyze_3.skippedScope)();
     const ci = await collectCi(client, context.sha, pr.headSha, config, {
         evidence: config.checks.testEvidence,
         claims: config.checks.claims,
@@ -36908,6 +37879,9 @@ async function run(deps) {
             ciError: ci.ciError,
         })
         : (0, verify_1.skippedClaims)();
+    const provenance = config.checks.lockfileProvenance
+        ? await collectProvenance(client, pr, fileResult, config.lockfileProvenance.maxLookups, deps.lookupProvenance)
+        : (0, analyze_2.skippedProvenance)();
     const report = {
         language,
         failOn,
@@ -36917,6 +37891,7 @@ async function run(deps) {
         evidence: ci.evidence,
         packet,
         claims,
+        provenance,
     };
     const body = (0, render_1.renderComment)(report, prRepo);
     let comments;
@@ -36944,6 +37919,7 @@ async function run(deps) {
     deps.io.setOutput('test-evidence-status', ci.evidence.status);
     deps.io.setOutput('review-packet-status', packet.status);
     deps.io.setOutput('claims-status', claims.status);
+    deps.io.setOutput('lockfile-provenance-status', provenance.status);
     deps.io.setOutput('comment-url', posted.url);
     deps.io.setOutput('head-sha', context.sha);
     await deps.io.writeSummary((0, render_1.renderSummary)(report, prRepo));
@@ -36956,6 +37932,7 @@ async function run(deps) {
         else
             deps.io.warning(message);
     }
+    // Report-only. Unknown provenance and registry errors stay out of fail-on.
     const failure = (0, threshold_1.thresholdFailure)(failOn, [
         { name: 'scope', status: scope.status },
         { name: 'test-evidence', status: ci.evidence.status },
@@ -37139,6 +38116,23 @@ async function resolveClaimIssues(client, prRepo, claims, issues) {
         }
     }
     return resolved;
+}
+async function collectProvenance(client, pr, fileResult, maxLookups, lookup) {
+    if (fileResult?.error)
+        return (0, analyze_2.filesUnavailableProvenance)(fileResult.error);
+    return (0, analyze_2.analyzeLockfiles)({
+        files: fileResult?.files ?? [],
+        maxLookups,
+        lookup: lookup ?? (0, lookup_1.createRegistryProvenanceClient)(),
+        read: async (path, which) => {
+            try {
+                return await client.getRepoFile(path, which === 'base' ? pr.baseSha : pr.headSha);
+            }
+            catch (error) {
+                return { text: null, error: errorMessage(error) };
+            }
+        },
+    });
 }
 function commentFailure(number, error) {
     if (error instanceof errors_1.GitHubHttpError && (error.status === 401 || error.status === 403 || error.status === 404)) {

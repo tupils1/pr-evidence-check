@@ -94,6 +94,30 @@ describe('config', () => {
     expect(loadConfig('test-evidence:\n  no-evidence: info\n', 'cfg').testEvidence.noEvidence).toBe('info')
   })
 
+  it('configures report-only lockfile provenance', () => {
+    expect(defaultConfig().checks.lockfileProvenance).toBe(true)
+    expect(defaultConfig().lockfileProvenance.maxLookups).toBe(30)
+    const warnings: string[] = []
+    const config = loadConfig(
+      [
+        'checks:',
+        '  lockfile-provenance: false',
+        'lockfile-provenance:',
+        '  max-lookups: 0',
+        '  extra: true',
+      ].join('\n'),
+      'cfg',
+      (message) => warnings.push(message),
+    )
+    expect(config.checks.lockfileProvenance).toBe(false)
+    expect(config.lockfileProvenance.maxLookups).toBe(0)
+    expect(warnings.some((warning) => warning.includes('lockfile-provenance.extra'))).toBe(true)
+    expect(loadConfig('lockfileProvenance:\n  maxLookups: 4\n', 'cfg').lockfileProvenance.maxLookups).toBe(4)
+    expect(() => loadConfig('lockfile-provenance: []\n', 'cfg')).toThrow(/mapping/)
+    expect(() => loadConfig('lockfile-provenance:\n  max-lookups: -1\n', 'cfg')).toThrow(/>= 0/)
+    expect(() => loadConfig('checks:\n  lockfile-provenance: yes\n', 'cfg')).toThrow(/boolean/)
+  })
+
   it('reports an unreadable config file as misconfiguration', () => {
     expect(() => loadConfigFile('/proc/does-not-exist-pr-evidence/nope.yml')).not.toThrow()
   })

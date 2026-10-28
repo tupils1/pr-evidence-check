@@ -3,6 +3,7 @@ import { verifyClaims } from '../src/claims/verify'
 import { defaultConfig } from '../src/config'
 import { buildEvidence } from '../src/evidence/select'
 import { analyzePacket } from '../src/packet/analyze'
+import { emptyProvenance } from '../src/provenance/analyze'
 import { renderComment } from '../src/render'
 import { analyzeScope } from '../src/scope/analyze'
 import type { Report } from '../src/types'
@@ -94,6 +95,19 @@ const report: Report = {
   evidence,
   packet,
   claims,
+  provenance: {
+    ...emptyProvenance(),
+    signals: [],
+    lockfiles: [{ path: 'package-lock.json', added: 1 }],
+    packages: [{
+      lockfile: 'package-lock.json',
+      ecosystem: 'npm',
+      name: 'left-pad',
+      version: '1.3.0',
+      state: 'unknown',
+      detail: { code: 'no_attestation' },
+    }],
+  },
 }
 
 process.stdout.write(`${renderComment(report, prRepo)}\n`)

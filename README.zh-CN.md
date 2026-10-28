@@ -2,7 +2,7 @@
 
 给维护者用的免费 GitHub Action，用来看 pull request，包括代理生成的 pull request。它只发 **一条评论**，之后每次都在原地更新这一条。
 
-四项检查都是确定规则。不调用 LLM，也不把代码送到模型 API。除了读取 pull request、关联 issue 和已经跑完的 CI，runner 不向外发送仓库内容。声明核验是尚未发布的 v1.1 检查。`v1` 和 `v1.0.0` 标签里没有它。
+五项检查都是确定规则。不调用 LLM，也不把代码送到模型 API。GitHub API 读取 pull request、关联 issue 和已经跑完的 CI。锁文件有改动时，来源证明只把包名和版本发给公共仓库。声明核验和锁文件来源证明都不在 `v1` 和 `v1.0.0` 标签里。
 
 **零配置。** 不需要 `.github/pr-evidence.yml`。没有这个文件就用内置默认值。
 
@@ -14,7 +14,7 @@
 
 ## Unreleased / v1.1
 
-声明核验在这个分支上，**不在** `v1` 和 `v1.0.0` 标签里。这两个标签仍只跑下面三项检查。仓库没有 v1.1 发行版。
+声明核验和锁文件来源证明在这个分支上，**不在** `v1` 和 `v1.0.0` 标签里。这两个标签仍只跑范围、测试证据和审查材料包。仓库没有 v1.1 发行版。
 
 action 读取 PR 标题和描述。`claims.scan-commits` 为 true 时也读提交说明。每条配置好的短语，都只用这个 head SHA 上 action 已经收集的数据：像测试的 job 和解析出的数量、其他 check run 和 job、diff、关联 issue。每条声明标成 **已证实**、**相矛盾** 或 **未证实**，写进同一条粘性评论的新小节。规则是确定的，不调用 LLM。
 
@@ -71,6 +71,23 @@ PR 描述里应有四节：**Intent**、**Risks**、**Tests run**、**Self-verif
 ### 4. 声明核验
 
 见 [Unreleased / v1.1](#unreleased--v11)。标题、描述和可选的提交说明里的短语，会在同一条粘性评论里标成已证实、相矛盾或未证实。相矛盾的声明是警告。除非设置了 `fail-on`，不会因此让 job 失败。
+
+### 5. 锁文件来源证明
+
+只报告，不拦截。PR 改了 `package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`poetry.lock`、`Cargo.lock` 或 `go.sum` 时，评论列出 base 文件里没有的包版本。新增的锁文件会列出其中每一个包。重命名的锁文件和旧路径上的文件比较。删除的锁文件忽略。原来就有的版本不会再列。
+
+`present` 表示公共仓库的 API 为这个包名和版本返回了来源证明或 sigstore attestation：
+
+| 生态 | `present` 的含义 |
+| --- | --- |
+| npm | `registry.npmjs.org` 上该版本文档有 `dist.attestations.provenance`，或有 attestation URL |
+| PyPI | integrity API 为锁文件里写明的文件返回了 attestation bundle；锁文件没写文件名时，用 JSON API 里的 sdist，没有 sdist 则用 wheel |
+| crates.io | 该版本的可信发布记录里有提交 SHA 和仓库 |
+| Go | 模块代理的 `.info` 文档里有来源 URL 和哈希 |
+
+其余都是 `unknown`：没有 attestation、公共仓库没有这个版本、查询失败或超时、达到查询上限，或包来自 git、文件、link、私有仓库。`unknown` 不是失败。这项运行时状态是 `pass`，`checks.lockfile-provenance` 为 false 时是 `skipped`。`fail-on` 不读它，所以不会因此让 job 失败，也不会挡住合并。
+
+默认最多向公共仓库查询 30 次。`lockfile-provenance.max-lookups` 可以改这个上限。超过上限的包标 `unknown`，不再请求。评论最多列出 40 行。发出去的只有包名和版本；锁文件里已经写了 PyPI 文件名时，连文件名一起发。锁文件正文、diff 和 PR 描述不会发出去。
 
 ## 接上
 
@@ -136,7 +153,7 @@ fork 触发的 `pull_request` 不能写评论。[`examples/workflow-fork-prs.yml
 
 | 权限 | 原因 |
 | --- | --- |
-| `contents: read` | 读取 base SHA 上的 `.github/pr-evidence.yml`。 |
+| `contents: read` | 读取 base SHA 上的 `.github/pr-evidence.yml`，并读取 base 和 head SHA 上有改动的锁文件。 |
 | `pull-requests: write` | 读取 pull request 和改动文件，并创建或更新那一条评论。 |
 | `issues: read` | 读取每个关联 issue 的标题和正文。 |
 | `checks: read` | 列出 head SHA 上的 check run。 |
@@ -178,6 +195,7 @@ npm run demo
 | 命中的测试 job 失败、超时或取消 | warn |
 | 审查材料包缺节、过短或只有占位 | warn |
 | 有声明与证据相矛盾 | warn。`claims.contradicted: error` 会把这项升为 error。未证实的声明仍算在通过的检查里 |
+| 锁文件来源证明缺失、unknown，或查询公共仓库失败 | pass。这一项只报告。`fail-on` 不读它 |
 
 `test-evidence.require-passed: true` 会把失败的测试 job 升为 error。`test-evidence.no-evidence: warn` 或 `error` 会把默认的 info（没有测试 job）升高。`review-packet.incomplete: error` 会把不完整的审查材料包升为 error。如果你设置了 `fail-on`，又在分支保护里把这个 job 标成必需，GitHub 会挡住合并。这是可选的。默认不会挡。
 
@@ -193,6 +211,7 @@ checks:
   test-evidence: true
   review-packet: true
   claims: true
+  lockfile-provenance: true
 
 scope:
   large-diff-lines: 400
@@ -224,6 +243,9 @@ claims:
   #     evidence: tests # tests、lint、build、breaking、test_files 或 linked_issue
   #     patterns:
   #       - "(?i)(?<![A-Za-z])all tests pass(?![A-Za-z])"
+
+lockfile-provenance:
+  max-lookups: 30 # 新增包的公共仓库查询次数。其余包标 unknown，不再请求。
 ```
 
 action 的 `comment-language` 覆盖 `language`。`fail-on` 是 action 输入，不是配置项，因为让 job 失败是 workflow 的决定。
@@ -241,7 +263,7 @@ job 名称模式是 JavaScript 正则。开头的 `(?i)` 表示这条模式不�
 | `fail-on` | `none` | `none`、`warning` 或 `error`。 |
 | `comment-language` | 空 | `en` 或 `zh`。空则用配置文件，配置默认 `en`。 |
 
-输出：`scope-status`、`test-evidence-status`、`review-packet-status`、`claims-status`（`pass`、`warn`、`error` 或 `skipped`）、`comment-url`、`head-sha`。
+输出：`scope-status`、`test-evidence-status`、`review-packet-status`、`claims-status`（`pass`、`warn`、`error` 或 `skipped`）、`lockfile-provenance-status`（`pass` 或 `skipped`）、`comment-url`、`head-sha`。
 
 workflow 的 job summary 与评论正文相同。
 
@@ -253,6 +275,7 @@ workflow 的 job summary 与评论正文相同。
 - 评论是当时的快照，不会干等别的 workflow。放在测试后面跑，或用之后的 `workflow_run` 更新同一条评论。
 - 它不判断改动对不对。
 - 声明短语是字面模式。对不上模式的句子不是声明。已证实的 `fixed #12` 只说明该 issue 存在并且被引用。
+- 锁文件来源证明是公共仓库对这个包名和版本的回答。`present` 不是对这个包的审查。`unknown` 不是失败的检查。git、文件和私有来源不会查询。
 
 ## 开发
 
