@@ -2,7 +2,7 @@
 
 A free GitHub Action for maintainers reviewing pull requests, including ones an agent wrote. It posts **one comment** and updates that same comment in place.
 
-It does four deterministic checks. No LLM. No model API. Nothing from the pull request is sent off the runner except the normal GitHub API calls that read the pull request, the linked issues, and CI that already ran. Claim verification is the unreleased v1.1 check. The `v1` and `v1.0.0` tags do not include it.
+It does five deterministic checks. No LLM. No model API. GitHub API calls read the pull request, the linked issues, and CI that already ran. When a lockfile changed, provenance lookups send only the package name and version to a public registry. Claim verification and lockfile provenance are not in the `v1` or `v1.0.0` tags.
 
 **Zero config.** You do not need `.github/pr-evidence.yml`. Built-in defaults are on until you override them.
 
@@ -14,7 +14,7 @@ The comment above is the sticky comment on [pull request #9](https://github.com/
 
 ## Unreleased / v1.1
 
-Claim verification is on this branch and is **not** in the `v1` or `v1.0.0` tags. Those tags still run the three checks below. This repository has no v1.1 release.
+Claim verification and lockfile provenance are on this branch and are **not** in the `v1` or `v1.0.0` tags. Those tags still run scope, test evidence, and the review packet. This repository has no v1.1 release.
 
 The action reads the pull request title and description. If `claims.scan-commits` is true, it also reads commit messages. For each configured phrase it uses data this action already collects for the head SHA: test jobs and parsed counts, other check runs and jobs, the diff, and linked issues. Each claim is **verified**, **contradicted**, or **unverified**, in a new section of the same sticky comment. Matching is deterministic. No LLM.
 
@@ -36,7 +36,7 @@ This does not prove the diff is correct. `fixed #12` means the issue exists and 
 
 ### 中文
 
-声明核验在这个分支上，**不在** `v1` 和 `v1.0.0` 标签里。这两个标签仍只跑下面三项检查。仓库没有 v1.1 发行版。
+声明核验和锁文件来源证明在这个分支上，**不在** `v1` 和 `v1.0.0` 标签里。这两个标签仍只跑范围、测试证据和审查材料包。仓库没有 v1.1 发行版。
 
 action 读取 PR 标题和描述。`claims.scan-commits` 为 true 时也读提交说明。每条配置好的短语，都只用这个 head SHA 上 action 已经收集的数据：像测试的 job 和解析出的数量、其他 check run 和 job、diff、关联 issue。每条声明标成 **已证实**、**相矛盾** 或 **未证实**，写进同一条粘性评论的新小节。规则是确定的，不调用 LLM。
 
@@ -93,6 +93,23 @@ The pull request body should contain four sections: **Intent**, **Risks**, **Tes
 ### 4. Claim verification
 
 See [Unreleased / v1.1](#unreleased--v11). Phrases in the title, description, and optional commit messages are marked verified, contradicted, or unverified in the same sticky comment. Contradicted claims warn. They do not fail the job unless `fail-on` is set.
+
+### 5. Lockfile provenance
+
+Report only. When the pull request changes `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `Cargo.lock`, or `go.sum`, the comment lists package versions that were not in the base file. An added lockfile lists every package in it. A renamed lockfile is compared with the file at the old path. Removed lockfiles are ignored. A version that was already present is not listed again.
+
+`present` means a public registry API returned provenance or a sigstore attestation for that name and version:
+
+| Ecosystem | What `present` means |
+| --- | --- |
+| npm | The version document on `registry.npmjs.org` has `dist.attestations.provenance`, or an attestation URL |
+| PyPI | The integrity API returns an attestation bundle for a file named in the lockfile, or for the sdist (otherwise a wheel) from the JSON API |
+| crates.io | The version's trusted-publishing record has a commit SHA and a repository |
+| Go | The module proxy `.info` document has an origin URL and hash |
+
+Anything else stays `unknown`: no attestation, the version was not found, the lookup failed or timed out, the lookup cap was reached, or the package came from git, a file, a link, or a private registry. `unknown` is not a failure. This check's status is `pass` when it runs and `skipped` when `checks.lockfile-provenance` is false. `fail-on` does not read it, so it does not fail the job and does not block a merge.
+
+The default asks at most 30 public registries. `lockfile-provenance.max-lookups` changes that cap. Packages past the cap are `unknown` and are not requested. The comment shows 40 rows. Only the package name and version are sent, plus a PyPI filename when the lockfile already lists one. Lockfile text, the diff, and the pull request body are not sent.
 
 ## Add it
 
@@ -158,7 +175,7 @@ Config is read from the **base** SHA via the API. A pull request cannot delete `
 
 | Permission | Why |
 | --- | --- |
-| `contents: read` | Read `.github/pr-evidence.yml` at the base SHA. |
+| `contents: read` | Read `.github/pr-evidence.yml` at the base SHA, and read changed lockfiles at the base and head SHAs. |
 | `pull-requests: write` | Read the pull request and its files, and create or update the one comment. |
 | `issues: read` | Read the title and body of each linked issue. |
 | `checks: read` | List check runs for the head SHA. |
@@ -200,6 +217,7 @@ Default severities:
 | A matched test job failed, timed out, or was cancelled | warn |
 | Review packet section missing, empty, or a placeholder | warn |
 | A claim is contradicted | warn. `claims.contradicted: error` raises that check to error. Unverified claims stay inside a passing check |
+| Lockfile provenance is missing, unknown, or a registry lookup failed | pass. This check only reports. `fail-on` does not read it |
 
 `test-evidence.require-passed: true` raises a failed test job to error. `test-evidence.no-evidence: warn` or `error` raises the default info for a missing test job. `review-packet.incomplete: error` raises an incomplete packet to an error. If you set `fail-on` and also mark this job required in branch protection, GitHub will block the merge. That is opt-in. The default does not.
 
@@ -215,6 +233,7 @@ checks:
   test-evidence: true
   review-packet: true
   claims: true
+  lockfile-provenance: true
 
 scope:
   large-diff-lines: 400
@@ -246,6 +265,9 @@ claims:
   #     evidence: tests # tests, lint, build, breaking, test_files, or linked_issue
   #     patterns:
   #       - "(?i)(?<![A-Za-z])all tests pass(?![A-Za-z])"
+
+lockfile-provenance:
+  max-lookups: 30 # public registry lookups for newly added packages. Further packages stay unknown.
 ```
 
 `comment-language` on the action overrides `language`. `fail-on` is an action input, not a config key, because failing the job is a workflow choice.
@@ -263,7 +285,7 @@ Job-name patterns are JavaScript regular expressions. A leading `(?i)` makes one
 | `fail-on` | `none` | `none`, `warning`, or `error`. |
 | `comment-language` | empty | `en` or `zh`. Empty uses the config file, which defaults to `en`. |
 
-Outputs: `scope-status`, `test-evidence-status`, `review-packet-status`, `claims-status` (`pass`, `warn`, `error`, or `skipped`), `comment-url`, `head-sha`.
+Outputs: `scope-status`, `test-evidence-status`, `review-packet-status`, `claims-status` (`pass`, `warn`, `error`, or `skipped`), `lockfile-provenance-status` (`pass` or `skipped`), `comment-url`, `head-sha`.
 
 The workflow also gets a job summary with the same body as the comment.
 
@@ -275,6 +297,7 @@ The workflow also gets a job summary with the same body as the comment.
 - The comment is a snapshot. It does not wait for other workflows. Run it after tests, or let a later `workflow_run` update the same comment.
 - The action does not decide whether the change is correct.
 - Claim phrases are literal patterns. A sentence that does not match a pattern is not a claim. A verified `fixed #12` only means that issue exists and is referenced.
+- Lockfile provenance is the public registry's answer for that name and version. `present` is not a review of the package. `unknown` is not a failed check. Git, file, and private sources are not queried.
 
 ## Development
 

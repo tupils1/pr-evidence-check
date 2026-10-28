@@ -9,6 +9,7 @@ checks:
   test-evidence: true
   review-packet: true
   claims: true
+  lockfile-provenance: true
 
 scope:
   # Warn when the pull request reaches either threshold.
@@ -97,3 +98,10 @@ claims:
   # test-paths:
   #   - "**/*.{test,spec}.{js,cjs,mjs,ts,tsx,jsx}"
   #   - "**/tests/**"
+
+# Report only. Unknown provenance does not fail the job, and fail-on does not read it.
+# When a lockfile changes, lookups send the package name and version to a public registry.
+lockfile-provenance:
+  # Newly added packages queried against npm, PyPI, crates.io, or the Go module proxy.
+  # Packages past this cap stay unknown and are not requested. 0 disables lookups.
+  max-lookups: 30

@@ -93,22 +93,32 @@ export function createGitHubClient(options: {
 
     async getRepoFile(path, ref) {
       const clean = path.replace(/^\/+/, '')
-      const response = await transport.request('GET /repos/{owner}/{repo}/contents/{path}', {
-        owner,
-        repo,
-        path: clean,
-        ref,
-      })
+      const params = { owner, repo, path: clean, ref }
+      const response = await transport.request('GET /repos/{owner}/{repo}/contents/{path}', params)
       if (response.status === 404) return { text: null }
+      if (response.status >= 200 && response.status < 300) {
+        const decoded = decodeGitHubContent(response.data)
+        if (decoded != null) return { text: decoded }
+      }
+      // The contents JSON API refuses blobs over 1 MB. The raw media type, or a
+      // parsed JSON body, still carries lockfiles that the provenance check reads.
+      const raw = await transport.request('GET /repos/{owner}/{repo}/contents/{path}', {
+        ...params,
+        headers: { accept: 'application/vnd.github.raw' },
+      })
+      if (raw.status === 404) return { text: null }
+      if (raw.status >= 200 && raw.status < 300) {
+        const decoded = decodeGitHubContent(raw.data)
+        if (decoded != null) return { text: decoded }
+        if (asRecord(raw.data) && !isGitHubErrorBody(raw.data)) {
+          return { text: JSON.stringify(raw.data) }
+        }
+        return { text: null, error: 'response did not include file content' }
+      }
       if (response.status < 200 || response.status >= 300) {
         return { text: null, error: httpMessage(response.status, response.data) }
       }
-      const record = asRecord(response.data)
-      const content = asString(record?.content)
-      if (!content || record?.encoding !== 'base64') {
-        return { text: null, error: 'config response did not include base64 file content' }
-      }
-      return { text: Buffer.from(content.replace(/\n/g, ''), 'base64').toString('utf8') }
+      return { text: null, error: 'response did not include file content' }
     },
 
     async listFiles(number) {
@@ -415,6 +425,18 @@ function splitRepo(repo: string, fallbackOwner: string, fallbackName: string): [
   const [owner, name] = repo.split('/')
   if (owner && name) return [owner, name]
   return [fallbackOwner, fallbackName]
+}
+
+function decodeGitHubContent(data: unknown): string | null {
+  if (typeof data === 'string') return data
+  const record = asRecord(data)
+  if (!record || typeof record.content !== 'string' || record.encoding !== 'base64') return null
+  return Buffer.from(record.content.replace(/\n/g, ''), 'base64').toString('utf8')
+}
+
+function isGitHubErrorBody(data: unknown): boolean {
+  const record = asRecord(data)
+  return Boolean(record && typeof record.message === 'string' && typeof record.documentation_url === 'string')
 }
 
 function httpMessage(status: number, data: unknown): string {

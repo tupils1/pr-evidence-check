@@ -200,4 +200,97 @@ describe('github client', () => {
     expect((await broken.listClosingIssues(1)).error).toMatch(/graphql failed/)
     expect(await broken.getJobLog(1, 10)).toEqual({ text: null, error: 'log download is not configured' })
   })
+
+  it('falls back to raw contents when a lockfile blob is too large for the JSON API', async () => {
+    const acceptOf = (params: Record<string, unknown>): string => {
+      const headers = params.headers
+      if (!headers || typeof headers !== 'object') return ''
+      const accept = (headers as { accept?: unknown }).accept
+      return typeof accept === 'string' ? accept : ''
+    }
+    const calls: string[] = []
+    const rawText = createGitHubClient({
+      owner: 'acme',
+      repo: 'app',
+      transport: transport(async (_route, params) => {
+        const accept = acceptOf(params)
+        calls.push(accept || 'json')
+        if (accept.includes('raw')) return { status: 200, data: '{"lockfileVersion":3}\n' }
+        return { status: 403, data: { message: 'This API returns blobs up to 1 MB in size.' } }
+      }),
+    })
+    expect((await rawText.getRepoFile('package-lock.json', 'abc')).text).toContain('lockfileVersion')
+    expect(calls).toEqual(['json', 'application/vnd.github.raw'])
+
+    const rawJson = createGitHubClient({
+      owner: 'acme',
+      repo: 'app',
+      transport: transport(async (_route, params) => {
+        if (acceptOf(params).includes('raw')) return { status: 200, data: { lockfileVersion: 3, packages: {} } }
+        return { status: 403, data: { message: 'too large' } }
+      }),
+    })
+    expect(JSON.parse((await rawJson.getRepoFile('package-lock.json', 'abc')).text ?? '')).toMatchObject({ lockfileVersion: 3 })
+
+    const missing = createGitHubClient({
+      owner: 'acme',
+      repo: 'app',
+      transport: transport(async () => ({ status: 404, data: { message: 'Not Found' } })),
+    })
+    expect(await missing.getRepoFile('Cargo.lock', 'abc')).toEqual({ text: null })
+
+    let rawCalls = 0
+    const onlyMissing = createGitHubClient({
+      owner: 'acme',
+      repo: 'app',
+      transport: transport(async (_route, params) => {
+        if (acceptOf(params)) rawCalls += 1
+        return { status: 404, data: {} }
+      }),
+    })
+    expect(await onlyMissing.getRepoFile('go.sum', 'abc')).toEqual({ text: null })
+    expect(rawCalls).toBe(0)
+
+    const down = createGitHubClient({
+      owner: 'acme',
+      repo: 'app',
+      transport: transport(async (_route, params) => {
+        if (acceptOf(params).includes('raw')) return { status: 502, data: { message: 'bad gateway' } }
+        return { status: 403, data: { message: 'too large' } }
+      }),
+    })
+    expect((await down.getRepoFile('yarn.lock', 'abc')).error).toMatch(/403/)
+
+    const rawMissing = createGitHubClient({
+      owner: 'acme',
+      repo: 'app',
+      transport: transport(async (_route, params) => {
+        if (acceptOf(params).includes('raw')) return { status: 404, data: {} }
+        return { status: 403, data: { message: 'too large' } }
+      }),
+    })
+    expect(await rawMissing.getRepoFile('pnpm-lock.yaml', 'abc')).toEqual({ text: null })
+
+    const emptyBody = createGitHubClient({
+      owner: 'acme',
+      repo: 'app',
+      transport: transport(async (_route, params) => {
+        if (acceptOf(params).includes('raw')) {
+          return { status: 200, data: { message: 'nope', documentation_url: 'https://docs.github.com' } }
+        }
+        return { status: 200, data: { sha: 'abc' } }
+      }),
+    })
+    expect((await emptyBody.getRepoFile('poetry.lock', 'abc')).error).toMatch(/did not include file content/)
+
+    const rawDown = createGitHubClient({
+      owner: 'acme',
+      repo: 'app',
+      transport: transport(async (_route, params) => {
+        if (acceptOf(params).includes('raw')) return { status: 500, data: { message: 'nope' } }
+        return { status: 200, data: { sha: 'abc' } }
+      }),
+    })
+    expect((await rawDown.getRepoFile('Cargo.lock', 'abc')).error).toMatch(/did not include file content/)
+  })
 })

@@ -14,6 +14,9 @@ import type {
   Language,
   PacketReport,
   PacketSection,
+  ProvenanceDetail,
+  ProvenanceReport,
+  ProvenanceSignal,
   Report,
   ScopeFileReport,
   ScopeReport,
@@ -25,7 +28,7 @@ export const MARKER = '<!-- pr-evidence-check -->'
 const FILE_LIMIT = 40
 
 export function renderComment(report: Report, prRepo: string): string {
-  const statusLine = `<!-- pr-evidence-check scope=${report.scope.status} test-evidence=${report.evidence.status} review-packet=${report.packet.status} claims=${report.claims.status} -->`
+  const statusLine = `<!-- pr-evidence-check scope=${report.scope.status} test-evidence=${report.evidence.status} review-packet=${report.packet.status} claims=${report.claims.status} lockfile-provenance=${report.provenance.status} -->`
   const body = renderBody(report, prRepo)
   return `${MARKER}\n${statusLine}\n${body}`
 }
@@ -50,6 +53,8 @@ function renderBody(report: Report, prRepo: string): string {
     '',
     renderClaims(report.claims, lang),
     '',
+    renderProvenance(report.provenance, lang),
+    '',
     footer(report, lang),
   ]
   return parts.join('\n')
@@ -64,12 +69,14 @@ function intro(report: Report, lang: Language): string {
     return [
       '这是一条确定性的审查评论，只供维护者扫读。没有调用 LLM，也没有重新跑测试。',
       `下面的测试证据只来自 head SHA \`${shortSha(report.headSha)}\` 上**已经存在**的 check run 和 Actions job。`,
+      '锁文件有改动时，来源证明只把包名和版本发给公共仓库。',
       `默认不阻断合并（\`fail-on: ${report.failOn}\`）。`,
     ].join('')
   }
   return [
     'Deterministic review notes for maintainers. No LLM was called, and tests were not re-run.',
     ` Test evidence is whatever CI already recorded for head SHA \`${shortSha(report.headSha)}\`.`,
+    ' Lockfile provenance, when a lockfile changed, sends only the package name and version to a public registry.',
     ` This does not block merges (\`fail-on: ${report.failOn}\`).`,
   ].join('')
 }
@@ -81,6 +88,7 @@ function statusTable(report: Report, lang: Language): string {
     [lang === 'zh' ? '测试证据（已有 CI）' : 'Test evidence (existing CI)', statusWord(report.evidence.status, lang)],
     [lang === 'zh' ? '审查材料包' : 'Review packet', statusWord(report.packet.status, lang)],
     [lang === 'zh' ? '声明核验' : 'Claim verification', statusWord(report.claims.status, lang)],
+    [lang === 'zh' ? '锁文件来源证明' : 'Lockfile provenance', statusWord(report.provenance.status, lang)],
   ]
   return markdownTable(headers, rows.map((row) => row.map((value) => `**${value}**`)))
 }
@@ -214,6 +222,103 @@ function renderClaims(claims: ClaimReport, lang: Language): string {
     ? '相矛盾的声明默认是警告。除非 workflow 把 `fail-on` 设成 `warning` 或 `error`，否则不会因此让 job 失败。'
     : 'Contradicted claims are warnings by default. They do not fail the job unless `fail-on` is `warning` or `error`.')
   return lines.join('\n')
+}
+
+function renderProvenance(provenance: ProvenanceReport, lang: Language): string {
+  const title = lang === 'zh' ? '### 锁文件来源证明' : '### Lockfile provenance'
+  if (!provenance.enabled) {
+    return `${title} · ${statusWord('skipped', lang)}\n\n${lang === 'zh' ? '已在配置中关闭。' : 'Disabled in config.'}`
+  }
+  const lines: string[] = [`${title} · ${statusWord(provenance.status, lang)}`, '']
+  lines.push(lang === 'zh'
+    ? '只在 PR 改了 `package-lock.json`、`pnpm-lock.yaml`、`yarn.lock`、`poetry.lock`、`Cargo.lock` 或 `go.sum` 时，列出新增的包。`present` 表示公共仓库的 API 返回了来源证明或 sigstore attestation。查不到、没有这种记录，或网络失败，都标 `unknown`。这一节只报告，`fail-on` 不会读它，也不拦截合并。'
+    : 'When the pull request changes `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `Cargo.lock`, or `go.sum`, this lists package versions that were not in the base file. `present` means a public registry API returned provenance or a sigstore attestation. Anything missing, unpublished, or unreachable stays `unknown`. This section only reports. `fail-on` does not read it, and it does not block merges.')
+  if (provenance.signals.length > 0) {
+    lines.push('', lang === 'zh' ? '**信号**' : '**Signals**', '')
+    for (const signal of provenance.signals) lines.push(`- ${renderProvenanceSignal(signal, lang)}`)
+  }
+  if (provenance.packages.length > 0) {
+    lines.push('', lang === 'zh' ? '**新增的包**' : '**Added packages**', '')
+    if (provenance.omitted > 0) {
+      lines.push(lang === 'zh'
+        ? `只列出 ${provenance.packages.length} 个，另有 ${provenance.omitted} 个未列出。`
+        : `Showing ${provenance.packages.length} added packages. ${provenance.omitted} more were omitted.`)
+      lines.push('')
+    }
+    const headers = lang === 'zh' ? ['锁文件', '包', '来源证明'] : ['Lockfile', 'Package', 'Provenance']
+    const rows = provenance.packages.map((pkg) => [
+      `\`${cell(pkg.lockfile)}\``,
+      `\`${cell(`${pkg.name}@${pkg.version}`)}\``,
+      provenanceCell(pkg.state, pkg.detail, lang),
+    ])
+    lines.push(markdownTable(headers, rows))
+  }
+  return lines.join('\n')
+}
+
+function renderProvenanceSignal(signal: ProvenanceSignal, lang: Language): string {
+  switch (signal.id) {
+    case 'lockfile_provenance.none':
+      return lang === 'zh'
+        ? '`lockfile_provenance.none` — 没有改这些锁文件。'
+        : '`lockfile_provenance.none` — None of those lockfiles changed.'
+    case 'lockfile_provenance.no_additions':
+      return lang === 'zh'
+        ? `\`lockfile_provenance.no_additions\` — 这些锁文件有改动，但没有新增的包版本：${codeList(signal.lockfiles)}。`
+        : `\`lockfile_provenance.no_additions\` — These lockfiles changed and every package version was already present: ${codeList(signal.lockfiles)}.`
+    case 'lockfile_provenance.unreadable':
+      return lang === 'zh'
+        ? `\`lockfile_provenance.unreadable\` — 读不到 \`${cell(signal.lockfile)}\`，所以没有列出它新增的包：${cell(signal.message)}`
+        : `\`lockfile_provenance.unreadable\` — Could not read \`${cell(signal.lockfile)}\`, so its added packages were not listed: ${cell(signal.message)}`
+    case 'lockfile_provenance.lookup_failed':
+      return lang === 'zh'
+        ? `\`lockfile_provenance.lookup_failed\` — ${signal.count} 个包在查询公共仓库时失败，已标 unknown。`
+        : `\`lockfile_provenance.lookup_failed\` — ${signal.count} registry ${signal.count === 1 ? 'lookup' : 'lookups'} failed and ${signal.count === 1 ? 'that package is' : 'those packages are'} unknown.`
+    case 'lockfile_provenance.capped':
+      return lang === 'zh'
+        ? `\`lockfile_provenance.capped\` — 公共仓库查询在 ${signal.cap} 个包后停止。其余新增的包标 unknown，没有继续请求。`
+        : `\`lockfile_provenance.capped\` — Public registry lookups stopped after ${signal.cap} packages. Further added packages are unknown and were not requested.`
+    case 'lockfile_provenance.files_unreadable':
+      return lang === 'zh'
+        ? `\`lockfile_provenance.files_unreadable\` — 读不到 PR 文件列表，无法比较锁文件：${cell(signal.message)}`
+        : `\`lockfile_provenance.files_unreadable\` — The pull request file list could not be read, so lockfiles were not compared: ${cell(signal.message)}`
+  }
+}
+
+function provenanceCell(state: 'present' | 'unknown', detail: ProvenanceDetail, lang: Language): string {
+  const word = state === 'present'
+    ? (lang === 'zh' ? '有来源证明' : 'present')
+    : 'unknown'
+  return `${word} · ${provenanceDetail(detail, lang)}`
+}
+
+function provenanceDetail(detail: ProvenanceDetail, lang: Language): string {
+  switch (detail.code) {
+    case 'npm_provenance':
+      return lang === 'zh' ? 'npm registry 的 provenance' : 'npm registry provenance'
+    case 'npm_attestation':
+      return lang === 'zh' ? 'npm registry 的 sigstore attestation' : 'npm registry sigstore attestation'
+    case 'pypi_provenance':
+      return lang === 'zh' ? 'PyPI integrity provenance' : 'PyPI integrity provenance'
+    case 'crates_trustpub':
+      return lang === 'zh'
+        ? `crates.io 可信发布者 \`${cell(detail.repository)}\``
+        : `crates.io trusted publisher \`${cell(detail.repository)}\``
+    case 'go_origin':
+      return lang === 'zh'
+        ? `模块代理记录的来源 \`${cell(detail.url)}\``
+        : `module proxy origin \`${cell(detail.url)}\``
+    case 'no_attestation':
+      return lang === 'zh' ? '仓库响应里没有来源证明' : 'no provenance attestation in the registry response'
+    case 'not_found':
+      return lang === 'zh' ? '公共仓库里没有这个版本' : 'version was not found on the public registry'
+    case 'lookup_failed':
+      return lang === 'zh' ? '查询仓库失败' : 'registry lookup failed'
+    case 'not_queried':
+      return lang === 'zh' ? '达到查询上限，未请求' : 'not queried because the lookup cap was reached'
+    case 'not_registry':
+      return lang === 'zh' ? '不是这些公共仓库里的包' : 'not a package from these public registries'
+  }
 }
 
 function claimWhere(claim: ClaimResult, lang: Language): string {

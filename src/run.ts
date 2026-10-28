@@ -6,6 +6,8 @@ import { ActionFailure, GitHubHttpError } from './errors'
 import { buildEvidence, selectEvidence, skippedEvidence } from './evidence/select'
 import type { GitHubClient } from './github/client'
 import { analyzePacket, skippedPacket } from './packet/analyze'
+import { analyzeLockfiles, filesUnavailableProvenance, skippedProvenance } from './provenance/analyze'
+import { createRegistryProvenanceClient, type ProvenanceClient } from './provenance/lookup'
 import { renderComment, renderSummary } from './render'
 import { analyzeScope, skippedScope } from './scope/analyze'
 import { extractClosingReferences, issueKey, mergeLinkedIssues } from './scope/links'
@@ -38,6 +40,8 @@ export async function run(deps: {
   input: RunInput
   createClient: (token: string, owner: string, repo: string) => GitHubClient
   now?: () => Date
+  /** Defaults to public registry lookups. Tests pass a stub so they do not use the network. */
+  lookupProvenance?: ProvenanceClient
 }): Promise<{ commentUrl?: string; skipped?: boolean }> {
   const context = resolvePrContext(deps.input)
   if (context.kind === 'skip') {
@@ -70,7 +74,7 @@ export async function run(deps: {
   })
   const language = parseLanguage(deps.input.commentLanguage) ?? config.language
 
-  const needFiles = config.checks.scope || config.checks.claims
+  const needFiles = config.checks.scope || config.checks.claims || config.checks.lockfileProvenance
   const needIssues = config.checks.scope || config.checks.claims
   const fileResult = needFiles ? await loadFiles(client, pr.number) : undefined
   const issueResult = needIssues ? await loadLinkedIssues(client, pr, context.number, config, prRepo) : undefined
@@ -104,6 +108,9 @@ export async function run(deps: {
       ciError: ci.ciError,
     })
     : skippedClaims()
+  const provenance = config.checks.lockfileProvenance
+    ? await collectProvenance(client, pr, fileResult, config.lockfileProvenance.maxLookups, deps.lookupProvenance)
+    : skippedProvenance()
 
   const report: Report = {
     language,
@@ -114,6 +121,7 @@ export async function run(deps: {
     evidence: ci.evidence,
     packet,
     claims,
+    provenance,
   }
   const body = renderComment(report, prRepo)
   let comments
@@ -140,6 +148,7 @@ export async function run(deps: {
   deps.io.setOutput('test-evidence-status', ci.evidence.status)
   deps.io.setOutput('review-packet-status', packet.status)
   deps.io.setOutput('claims-status', claims.status)
+  deps.io.setOutput('lockfile-provenance-status', provenance.status)
   deps.io.setOutput('comment-url', posted.url)
   deps.io.setOutput('head-sha', context.sha)
   await deps.io.writeSummary(renderSummary(report, prRepo))
@@ -152,6 +161,7 @@ export async function run(deps: {
     else deps.io.warning(message)
   }
 
+  // Report-only. Unknown provenance and registry errors stay out of fail-on.
   const failure = thresholdFailure(failOn, [
     { name: 'scope', status: scope.status },
     { name: 'test-evidence', status: ci.evidence.status },
@@ -368,6 +378,28 @@ async function resolveClaimIssues(
     }
   }
   return resolved
+}
+
+async function collectProvenance(
+  client: GitHubClient,
+  pr: { baseSha: string; headSha: string },
+  fileResult: { files: ChangedFile[]; error?: string } | undefined,
+  maxLookups: number,
+  lookup: ProvenanceClient | undefined,
+): Promise<Report['provenance']> {
+  if (fileResult?.error) return filesUnavailableProvenance(fileResult.error)
+  return analyzeLockfiles({
+    files: fileResult?.files ?? [],
+    maxLookups,
+    lookup: lookup ?? createRegistryProvenanceClient(),
+    read: async (path, which) => {
+      try {
+        return await client.getRepoFile(path, which === 'base' ? pr.baseSha : pr.headSha)
+      } catch (error) {
+        return { text: null, error: errorMessage(error) }
+      }
+    },
+  })
 }
 
 function commentFailure(number: number, error: unknown): ActionFailure {

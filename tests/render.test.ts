@@ -6,6 +6,7 @@ import { renderComment, sortFiles } from '../src/render'
 import { analyzeScope } from '../src/scope/analyze'
 import { findSticky } from '../src/sticky'
 import { skippedClaims } from '../src/claims/verify'
+import { emptyProvenance } from '../src/provenance/analyze'
 import type { ChangedFile, LinkedIssue, Report } from '../src/types'
 
 const issue: LinkedIssue = {
@@ -61,6 +62,7 @@ function reportFor(language: Report['language']): Report {
     evidence,
     packet,
     claims: skippedClaims(),
+    provenance: emptyProvenance(),
   }
 }
 

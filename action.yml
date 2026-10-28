@@ -1,7 +1,8 @@
 name: PR Evidence Check
 description: >-
   Comment with linked-issue scope, existing CI test evidence, a review
-  packet, and deterministic checks of claims in the pull request text.
+  packet, deterministic checks of claims in the pull request text, and
+  a report of provenance for packages added to lockfiles.
   No LLM. Does not block merges.
 author: pr-evidence-check contributors
 
@@ -46,6 +47,8 @@ outputs:
     description: pass, warn, error, or skipped
   claims-status:
     description: pass, warn, error, or skipped. warn when a claim is contradicted, unless claims.contradicted is error.
+  lockfile-provenance-status:
+    description: pass or skipped. Report only. fail-on does not read it, and unknown provenance does not fail the job.
   comment-url:
     description: URL of the sticky pull request comment
   head-sha:

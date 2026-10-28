@@ -71,7 +71,7 @@ export function defaultHeadings(): ReviewPacketConfig['headings'] {
 export function defaultConfig(): Config {
   return {
     language: 'en',
-    checks: { scope: true, testEvidence: true, reviewPacket: true, claims: true },
+    checks: { scope: true, testEvidence: true, reviewPacket: true, claims: true, lockfileProvenance: true },
     scope: {
       largeDiffLines: 400,
       largeDiffFiles: 20,
@@ -109,6 +109,9 @@ export function defaultConfig(): Config {
       breakingNamePatterns: [...DEFAULT_BREAKING_PATTERNS],
       testPaths: [...DEFAULT_TEST_PATHS],
     },
+    lockfileProvenance: {
+      maxLookups: 30,
+    },
   }
 }
 
@@ -130,19 +133,23 @@ export function loadConfig(
     throw new ActionFailure('misconfigured', `${fileLabel} must be a YAML mapping.`)
   }
   const config = defaultConfig()
-  warnUnknown(raw, ['language', 'checks', 'scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims'], fileLabel, warn)
+  warnUnknown(raw, ['language', 'checks', 'scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims', 'lockfile-provenance', 'lockfileProvenance'], fileLabel, warn)
 
   if ('language' in raw) config.language = expectLanguage(raw.language, 'language')
   const checks = pick(raw, 'checks')
   if (checks !== undefined) {
     if (!isRecord(checks)) throw new ActionFailure('misconfigured', 'checks must be a mapping.')
-    warnUnknown(checks, ['scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims'], 'checks', warn)
+    warnUnknown(checks, ['scope', 'test-evidence', 'testEvidence', 'review-packet', 'reviewPacket', 'claims', 'lockfile-provenance', 'lockfileProvenance'], 'checks', warn)
     if ('scope' in checks) config.checks.scope = expectBoolean(checks.scope, 'checks.scope')
     const testFlag = firstDefined(checks, 'test-evidence', 'testEvidence')
     if (testFlag !== undefined) config.checks.testEvidence = expectBoolean(testFlag, 'checks.test-evidence')
     const packetFlag = firstDefined(checks, 'review-packet', 'reviewPacket')
     if (packetFlag !== undefined) config.checks.reviewPacket = expectBoolean(packetFlag, 'checks.review-packet')
     if ('claims' in checks) config.checks.claims = expectBoolean(checks.claims, 'checks.claims')
+    const provenanceFlag = firstDefined(checks, 'lockfile-provenance', 'lockfileProvenance')
+    if (provenanceFlag !== undefined) {
+      config.checks.lockfileProvenance = expectBoolean(provenanceFlag, 'checks.lockfile-provenance')
+    }
   }
 
   const scope = pick(raw, 'scope')
@@ -152,6 +159,8 @@ export function loadConfig(
   const packet = firstDefined(raw, 'review-packet', 'reviewPacket')
   if (packet !== undefined) applyPacket(config, packet, warn)
   if ('claims' in raw) applyClaims(config, raw.claims, warn)
+  const provenance = firstDefined(raw, 'lockfile-provenance', 'lockfileProvenance')
+  if (provenance !== undefined) applyProvenance(config, provenance, warn)
 
   validatePatterns(config)
   return config
@@ -376,6 +385,15 @@ function applyClaims(config: Config, value: unknown, warn: (message: string) => 
   if (breaking !== undefined) config.claims.breakingNamePatterns = expectPatternList('claims.breaking-name-patterns', breaking)
   const paths = firstDefined(value, 'test-paths', 'testPaths')
   if (paths !== undefined) config.claims.testPaths = expectPatternList('claims.test-paths', paths)
+}
+
+function applyProvenance(config: Config, value: unknown, warn: (message: string) => void): void {
+  if (!isRecord(value)) throw new ActionFailure('misconfigured', 'lockfile-provenance must be a mapping.')
+  warnUnknown(value, ['max-lookups', 'maxLookups'], 'lockfile-provenance', warn)
+  const maxLookups = firstDefined(value, 'max-lookups', 'maxLookups')
+  if (maxLookups !== undefined) {
+    config.lockfileProvenance.maxLookups = expectNonNegative('lockfile-provenance.max-lookups', maxLookups)
+  }
 }
 
 const CLAIM_EVIDENCE: readonly ClaimEvidenceKind[] = ['tests', 'lint', 'build', 'breaking', 'test_files', 'linked_issue']
